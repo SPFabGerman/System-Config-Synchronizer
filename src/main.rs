@@ -55,75 +55,30 @@ fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> Result<Vec<String>, 
     Ok(package_list)
 }
 
-fn get_group_packages(args: &HashMap<std::string::String, tera::Value>) -> Result<tera::Value, tera::Error> {
-    let groupname = match args.get("name") {
-        Some(val) => val.clone(),
-        None => return Err("No group was specified".into()),
-    };
-    let groupname = match groupname {
-        tera::Value::String(s) => s,
-        _ => return Err("Groupname is no string!".into()),
-    };
-    let mut packages = match get_packages_from_command(&["pacman", "-Sqg", &groupname[..]]) {
-        Ok(p) => p,
-        Err(_) => return Err("Packages in group could not be found.".into()),
-    };
-
-    if let Some(v) = args.get("except") {
-        let to_unlist = match v.clone() {
-            tera::Value::String(s) => vec![s],
-            tera::Value::Array(arr) => {
-                let mut a = Vec::new();
-                for v in arr {
-                    match v {
-                        tera::Value::String(s) => a.push(s),
-                        _ => return Err("Array does contain non-String elements!".into()),
-                    }
-                }
-                a
-            }
-            _ => return Err("except-Keyword can only contain Strings or Array of Strings.".into()),
-        };
-        packages = compare_lists_only_in_first(&packages, &to_unlist);
+fn get_packages_from_command_with_list<T: AsRef<OsStr>>(cmd: &[T], list: &[T]) -> Result<Vec<String>, Box<dyn Error>> {
+    if cmd.is_empty() {
+        return Err(Box::from("No command was specified!"));
+    }
+    if list.is_empty() {
+        return Ok(Vec::new());
     }
 
-    Ok(packages.join("\n").into())
-}
-
-fn error_pretty_print(err: &dyn Error, skip_first: bool) -> String {
-    let mut skip_first = skip_first;
-    let mut s = Vec::new();
-    let mut err: Option<&dyn Error> = Some(err);
-    while let Some(e) = err {
-        if !skip_first {
-            s.push(e.to_string());
-        }
-        skip_first = false;
-        err = e.source();
+    let mut cmd_proc = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .args(list)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    if !cmd_proc.wait().expect("Command should be spawned!").success() {
+        return Err(Box::from("Command did not succeed"));
     }
-
-    // If the Error string contains newlines, assume we have a multiline error and display it on its own lines.
-    if s.concat().contains('\n') {
-        format!("\n{}", s.join("\n"))
-    } else {
-        s.join(": ")
-    }
-}
-
-fn get_packages_from_config(path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
-    // Initialize Tera and load config file from path
-    let mut tera = Tera::default();
-    tera.add_template_file(path, Some("config_file"))?;
-
-    // Setup functions and variables
-    let context = Context::new();
-    tera.register_function("group", Box::new(get_group_packages));
-
-    // Read config file and map to array
-    let render = tera.render("config_file", &context)?;
-    let mut package_list: Vec<String> = render.lines().map(String::from).collect();
+    let mut package_list: Vec<String> =
+        io::BufReader::new(cmd_proc.stdout.take().expect("Stdout should be available!"))
+            .lines()
+            .flatten()
+            .collect();
     package_list.sort_unstable();
-
     Ok(package_list)
 }
 
@@ -142,11 +97,13 @@ fn compare_lists_in_both(l1: &[String], l2: &[String]) -> Vec<String> {
 }
 
 trait SystemConfigSyncronizer {
+    type State;
     type UpDiff;
     type DownDiff;
-    fn get_current_system_state(&self) -> Result<Vec<String>, Box<dyn Error>>;
-    fn get_up_diff(&self, config_state: &[String]) -> Result<Self::UpDiff, Box<dyn Error>>;
-    fn get_down_diff(&self, config_state: &[String]) -> Result<Self::DownDiff, Box<dyn Error>>;
+    fn get_current_config_state(&self, path: &Path) -> Result<Self::State, Box<dyn Error>>;
+    fn get_current_system_state(&self) -> Result<Self::State, Box<dyn Error>>;
+    fn get_up_diff(&self, config_state: &Self::State) -> Result<Self::UpDiff, Box<dyn Error>>;
+    fn get_down_diff(&self, config_state: &Self::State) -> Result<Self::DownDiff, Box<dyn Error>>;
     fn report_up_diff(&self, up_diff: &Self::UpDiff);
     fn report_down_diff(&self, down_diff: &Self::DownDiff);
     fn sync_up(&self, up_diff: Self::UpDiff) -> Result<(), Box<dyn Error>>;
@@ -158,24 +115,26 @@ trait SystemConfigSyncronizer {
         Ok(())
     }
 
-    fn sync_up_down(&self, config_state: &[String]) -> Result<(), Box<dyn Error>> {
+    fn sync_up_down(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+        let config_state = self.get_current_config_state(path)?;
         self.pre_sync()?;
-        let up_diff = self.get_up_diff(config_state)?;
+        let up_diff = self.get_up_diff(&config_state)?;
         self.report_up_diff(&up_diff);
         self.sync_up(up_diff)?;
-        let down_diff = self.get_down_diff(config_state)?;
+        let down_diff = self.get_down_diff(&config_state)?;
         self.report_down_diff(&down_diff);
         self.sync_down(down_diff)?;
         self.post_sync()?;
         Ok(())
     }
 
-    fn sync_down_up(&self, config_state: &[String]) -> Result<(), Box<dyn Error>> {
+    fn sync_down_up(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+        let config_state = self.get_current_config_state(path)?;
         self.pre_sync()?;
-        let down_diff = self.get_down_diff(config_state)?;
+        let down_diff = self.get_down_diff(&config_state)?;
         self.report_down_diff(&down_diff);
         self.sync_down(down_diff)?;
-        let up_diff = self.get_up_diff(config_state)?;
+        let up_diff = self.get_up_diff(&config_state)?;
         self.report_up_diff(&up_diff);
         self.sync_up(up_diff)?;
         self.post_sync()?;
@@ -195,6 +154,7 @@ struct ThreeStateSyncronizer {
     remove_cmd: Vec<String>,
     update_cmd: Vec<String>,
     get_orphans_cmd: Vec<String>,
+    get_group_packages_cmd: Vec<String>,
     to_install_report_msg: String,
     to_mark_explicit_report_msg: String,
     to_remove_report_msg: String,
@@ -232,6 +192,7 @@ fn new_pacman() -> ThreeStateSyncronizer {
         remove_cmd: vec!["doas".to_string(), "pacman".to_string(), "-Rs".to_string()],
         update_cmd: vec!["doas".to_string(), "pacman".to_string(), "-Syu".to_string()],
         get_orphans_cmd: vec!["pacman".to_string(), "-Qnqdt".to_string()],
+        get_group_packages_cmd: vec!["pacman".to_string(), "-Sqg".to_string()],
         to_install_report_msg: "Packages to install:".to_string(),
         to_mark_explicit_report_msg: "Packages to mark as explicit:".to_string(),
         to_remove_report_msg: "Packages to remove:".to_string(),
@@ -239,15 +200,86 @@ fn new_pacman() -> ThreeStateSyncronizer {
     }
 }
 
+impl ThreeStateSyncronizer {
+    fn get_group_packages(
+        cmd: &[String],
+        args: &HashMap<std::string::String, tera::Value>,
+    ) -> Result<tera::Value, tera::Error> {
+        let groupname = match args.get("name") {
+            Some(val) => val.clone(),
+            None => return Err("No group was specified".into()),
+        };
+        let groupname = match groupname {
+            tera::Value::String(s) => s,
+            _ => return Err("Groupname is no string!".into()),
+        };
+        let mut packages = match get_packages_from_command_with_list(cmd, &[groupname]) {
+            Ok(p) => p,
+            Err(_) => return Err("Packages in group could not be found.".into()),
+        };
+
+        if let Some(v) = args.get("except") {
+            let to_unlist = match v.clone() {
+                tera::Value::String(s) => vec![s],
+                tera::Value::Array(arr) => {
+                    let mut a = Vec::new();
+                    for v in arr {
+                        match v {
+                            tera::Value::String(s) => a.push(s),
+                            _ => return Err("Array does contain non-String elements!".into()),
+                        }
+                    }
+                    a
+                }
+                _ => return Err("except-Keyword can only contain Strings or Array of Strings.".into()),
+            };
+            packages = compare_lists_only_in_first(&packages, &to_unlist);
+        }
+
+        Ok(packages.join("\n").into())
+    }
+}
+
 impl SystemConfigSyncronizer for ThreeStateSyncronizer {
+    type State = Vec<String>;
     type UpDiff = ThreeStateUpDiff;
     type DownDiff = ThreeStateDownDiff;
 
-    fn get_current_system_state(&self) -> Result<Vec<String>, Box<dyn Error>> {
+    fn get_current_config_state(&self, path: &Path) -> Result<Self::State, Box<dyn Error>> {
+        // Initialize Tera and load config file from path
+        let mut tera = Tera::default();
+        tera.add_template_file(path, Some("config_file"))?;
+
+        // Setup functions and variables
+        let context = Context::new();
+
+        // Command needs to be evaluated here and not in closure, since the typechecker can't gurantee the closure is only called here.
+        // (Which is wierd, since the tera variable drops at the end of the method.)
+        // Otherwise we would move part of self out of this method body.
+        // We also need to clone the command, since otherwise we would be borrowing out of self, outside this method.
+        let cmd = self.get_group_packages_cmd.clone();
+        tera.register_function(
+            "group",
+            Box::new(
+                move |args: &HashMap<std::string::String, tera::Value>| -> Result<tera::Value, tera::Error> {
+                    ThreeStateSyncronizer::get_group_packages(&cmd, args)
+                },
+            ),
+        );
+
+        // Read config file and map to array
+        let render = tera.render("config_file", &context)?;
+        let mut package_list: Vec<String> = render.lines().map(String::from).collect();
+        package_list.sort_unstable();
+
+        Ok(package_list)
+    }
+
+    fn get_current_system_state(&self) -> Result<Self::State, Box<dyn Error>> {
         get_packages_from_command(&self.current_state_cmd)
     }
 
-    fn get_up_diff(&self, config_state: &[String]) -> Result<ThreeStateUpDiff, Box<dyn Error>> {
+    fn get_up_diff(&self, config_state: &Self::State) -> Result<ThreeStateUpDiff, Box<dyn Error>> {
         let installed_packages = get_packages_from_command(&self.installed_packages_cmd)?;
         let dependency_packages = get_packages_from_command(&self.dependency_packages_cmd)?;
 
@@ -257,7 +289,7 @@ impl SystemConfigSyncronizer for ThreeStateSyncronizer {
         })
     }
 
-    fn get_down_diff(&self, config_state: &[String]) -> Result<ThreeStateDownDiff, Box<dyn Error>> {
+    fn get_down_diff(&self, config_state: &Self::State) -> Result<ThreeStateDownDiff, Box<dyn Error>> {
         let explicitly_installed_packages = get_packages_from_command(&self.explicitly_installed_cmd)?;
         let explicitly_unrequired_packages = get_packages_from_command(&self.explicitly_unrequired_cmd)?;
         let explicitly_required_packages =
@@ -317,16 +349,29 @@ impl SystemConfigSyncronizer for ThreeStateSyncronizer {
     }
 }
 
-fn main() -> ExitCode {
-    let config_packages = match get_packages_from_config(Path::new("current_packages")) {
-        Err(e) => {
-            eprintln!("Could not parse config file: {}", error_pretty_print(e.as_ref(), true));
-            return ExitCode::FAILURE;
+fn error_pretty_print(err: &dyn Error, skip_first: bool) -> String {
+    let mut skip_first = skip_first;
+    let mut s = Vec::new();
+    let mut err: Option<&dyn Error> = Some(err);
+    while let Some(e) = err {
+        if !skip_first {
+            s.push(e.to_string());
         }
-        Ok(packages) => packages,
-    };
+        skip_first = false;
+        err = e.source();
+    }
+
+    // If the Error string contains newlines, assume we have a multiline error and display it on its own lines.
+    if s.concat().contains('\n') {
+        format!("\n{}", s.join("\n"))
+    } else {
+        s.join(": ")
+    }
+}
+
+fn main() -> ExitCode {
     let pacman_config = new_pacman();
-    if let Err(e) = pacman_config.sync_up_down(&config_packages) {
+    if let Err(e) = pacman_config.sync_up_down(Path::new("current_packages")) {
         eprintln!("Error syncronizing: {}", error_pretty_print(e.as_ref(), false));
         return ExitCode::FAILURE;
     }
