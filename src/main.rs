@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsStr;
+use std::fs::{self};
 use std::io::{self, BufRead};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use tera::{Context, Tera};
+use toml::Table;
 
 fn run_cmd<T: AsRef<OsStr>>(cmd: &[T]) -> Result<(), Box<dyn Error>> {
     if cmd.is_empty() {
@@ -169,7 +171,7 @@ struct ThreeStateDownDiff {
     to_mark_dependency: Vec<String>,
 }
 
-fn new_pacman() -> ThreeStateSyncronizer {
+fn pacman_default_config() -> ThreeStateSyncronizer {
     ThreeStateSyncronizer {
         current_state_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
         installed_packages_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
@@ -198,6 +200,59 @@ fn new_pacman() -> ThreeStateSyncronizer {
         to_remove_report_msg: "Packages to remove:".to_string(),
         to_mark_dependency_report_msg: "Packages to mark as dependencies:".to_string(),
     }
+}
+
+fn toml_value_to_cmd_array(val: &toml::Value) -> Result<Vec<String>, Box<dyn Error>> {
+    match val {
+        toml::Value::String(s) => Ok(s.split_whitespace().map(String::from).collect()),
+        toml::Value::Array(arr) => {
+            let mut str_arr = Vec::new();
+            for v in arr {
+                match v {
+                    toml::Value::String(s) => str_arr.push(s.clone()),
+                    _ => return Err("Array contains non-String Elements.".into()),
+                }
+            }
+            Ok(str_arr)
+        }
+        _ => Err("Value is not String or Array!".into()),
+    }
+}
+
+fn new_pacman(config: &toml::Table) -> Result<ThreeStateSyncronizer, Box<dyn Error>> {
+    let mut pacman_config = pacman_default_config();
+
+    for (k, v) in config {
+        match k.as_str() {
+            "current_state_cmd" => pacman_config.current_state_cmd = toml_value_to_cmd_array(v)?,
+            "installed_packages_cmd" => pacman_config.installed_packages_cmd = toml_value_to_cmd_array(v)?,
+            "dependency_packages_cmd" => pacman_config.dependency_packages_cmd = toml_value_to_cmd_array(v)?,
+            "explicitly_installed_cmd" => pacman_config.explicitly_installed_cmd = toml_value_to_cmd_array(v)?,
+            "explicitly_unrequired_cmd" => pacman_config.explicitly_unrequired_cmd = toml_value_to_cmd_array(v)?,
+            "as_explicit_cmd" => pacman_config.as_explicit_cmd = toml_value_to_cmd_array(v)?,
+            "install_cmd" => pacman_config.install_cmd = toml_value_to_cmd_array(v)?,
+            "as_dependency_cmd" => pacman_config.as_dependency_cmd = toml_value_to_cmd_array(v)?,
+            "remove_cmd" => pacman_config.remove_cmd = toml_value_to_cmd_array(v)?,
+            "update_cmd" => pacman_config.update_cmd = toml_value_to_cmd_array(v)?,
+            "get_orphans_cmd" => pacman_config.get_orphans_cmd = toml_value_to_cmd_array(v)?,
+            "get_group_packages_cmd" => pacman_config.get_group_packages_cmd = toml_value_to_cmd_array(v)?,
+            "to_install_report_msg" => {
+                pacman_config.to_install_report_msg = v.as_str().ok_or("Value is not a String!")?.to_string()
+            }
+            "to_mark_explicit_report_msg" => {
+                pacman_config.to_mark_explicit_report_msg = v.as_str().ok_or("Value is not a String!")?.to_string()
+            }
+            "to_remove_report_msg" => {
+                pacman_config.to_remove_report_msg = v.as_str().ok_or("Value is not a String!")?.to_string()
+            }
+            "to_mark_dependency_report_msg" => {
+                pacman_config.to_mark_dependency_report_msg = v.as_str().ok_or("Value is not a String!")?.to_string()
+            }
+            _ => eprintln!("Ignoring unknown key: {}", k),
+        }
+    }
+
+    Ok(pacman_config)
 }
 
 impl ThreeStateSyncronizer {
@@ -370,7 +425,36 @@ fn error_pretty_print(err: &dyn Error, skip_first: bool) -> String {
 }
 
 fn main() -> ExitCode {
-    let pacman_config = new_pacman();
+    let config = match fs::read_to_string("config.toml") {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error reading config file: {}", error_pretty_print(&e, false));
+            return ExitCode::FAILURE;
+        }
+    };
+    let config = match config.parse::<Table>() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error reading config file: {}", error_pretty_print(&e, false));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let pacman_config = match config.get("pacman") {
+        Some(toml::Value::Table(x)) => x,
+        _ => {
+            eprintln!("Could not find valid pacman configuration.");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let pacman_config = match new_pacman(pacman_config) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error in Pacman Config: {}", error_pretty_print(e.as_ref(), false));
+            return ExitCode::FAILURE;
+        }
+    };
     if let Err(e) = pacman_config.sync_up_down(Path::new("current_packages")) {
         eprintln!("Error syncronizing: {}", error_pretty_print(e.as_ref(), false));
         return ExitCode::FAILURE;
