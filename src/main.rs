@@ -140,18 +140,19 @@ fn compare_lists_in_both(l1: &[String], l2: &[String]) -> Vec<String> {
         .collect()
 }
 
-trait SystemConfigSyncronizer {
+trait ConfigDiff {
+    fn report(&self);
+    fn sync(self) -> Result<(), Box<dyn Error>>;
+}
+
+trait SystemConfigSyncronizer<'a> {
     type State;
-    type UpDiff;
-    type DownDiff;
+    type UpDiff: ConfigDiff;
+    type DownDiff: ConfigDiff;
     fn get_current_config_state(&self, path: &Path) -> Result<Self::State, Box<dyn Error>>;
     fn get_current_system_state(&self) -> Result<Self::State, Box<dyn Error>>;
-    fn get_up_diff(&self, config_state: &Self::State) -> Result<Self::UpDiff, Box<dyn Error>>;
-    fn get_down_diff(&self, config_state: &Self::State) -> Result<Self::DownDiff, Box<dyn Error>>;
-    fn report_up_diff(&self, up_diff: &Self::UpDiff);
-    fn report_down_diff(&self, down_diff: &Self::DownDiff);
-    fn sync_up(&self, up_diff: Self::UpDiff) -> Result<(), Box<dyn Error>>;
-    fn sync_down(&self, down_diff: Self::DownDiff) -> Result<(), Box<dyn Error>>;
+    fn get_up_diff(&'a self, config_state: &Self::State) -> Result<Self::UpDiff, Box<dyn Error>>;
+    fn get_down_diff(&'a self, config_state: &Self::State) -> Result<Self::DownDiff, Box<dyn Error>>;
     fn pre_sync(&self) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
@@ -159,28 +160,48 @@ trait SystemConfigSyncronizer {
         Ok(())
     }
 
-    fn sync_up_down(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+    fn sync_up(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
         let config_state = self.get_current_config_state(path)?;
         self.pre_sync()?;
         let up_diff = self.get_up_diff(&config_state)?;
-        self.report_up_diff(&up_diff);
-        self.sync_up(up_diff)?;
-        let down_diff = self.get_down_diff(&config_state)?;
-        self.report_down_diff(&down_diff);
-        self.sync_down(down_diff)?;
+        up_diff.report();
+        up_diff.sync()?;
         self.post_sync()?;
         Ok(())
     }
 
-    fn sync_down_up(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+    fn sync_down(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
         let config_state = self.get_current_config_state(path)?;
         self.pre_sync()?;
         let down_diff = self.get_down_diff(&config_state)?;
-        self.report_down_diff(&down_diff);
-        self.sync_down(down_diff)?;
+        down_diff.report();
+        down_diff.sync()?;
+        self.post_sync()?;
+        Ok(())
+    }
+
+    fn sync_up_down(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
+        let config_state = self.get_current_config_state(path)?;
+        self.pre_sync()?;
         let up_diff = self.get_up_diff(&config_state)?;
-        self.report_up_diff(&up_diff);
-        self.sync_up(up_diff)?;
+        up_diff.report();
+        up_diff.sync()?;
+        let down_diff = self.get_down_diff(&config_state)?;
+        down_diff.report();
+        down_diff.sync()?;
+        self.post_sync()?;
+        Ok(())
+    }
+
+    fn sync_down_up(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
+        let config_state = self.get_current_config_state(path)?;
+        self.pre_sync()?;
+        let down_diff = self.get_down_diff(&config_state)?;
+        down_diff.report();
+        down_diff.sync()?;
+        let up_diff = self.get_up_diff(&config_state)?;
+        up_diff.report();
+        up_diff.sync()?;
         self.post_sync()?;
         Ok(())
     }
@@ -205,11 +226,13 @@ struct ThreeStateSyncronizer<'a> {
     to_remove_report_msg: String,
     to_mark_dependency_report_msg: String,
 }
-struct ThreeStateUpDiff {
+struct ThreeStateUpDiff<'a> {
+    parent_sync: &'a ThreeStateSyncronizer<'a>,
     to_install: Vec<String>,
     to_mark_explicit: Vec<String>,
 }
-struct ThreeStateDownDiff {
+struct ThreeStateDownDiff<'a> {
+    parent_sync: &'a ThreeStateSyncronizer<'a>,
     to_remove: Vec<String>,
     to_mark_dependency: Vec<String>,
 }
@@ -228,7 +251,7 @@ fn pacman_default_config(gconfig: &GlobalConfig) -> ThreeStateSyncronizer {
             "-D".to_string(),
             "--asexplicit".to_string(),
         ],
-        install_cmd: vec!["doas".to_string(), "pacman".to_string(), "-S".to_string()],
+        install_cmd: vec![gconfig.sudo_cmd.clone(), "pacman".to_string(), "-S".to_string()],
         as_dependency_cmd: vec![
             gconfig.sudo_cmd.clone(),
             "pacman".to_string(),
@@ -342,10 +365,10 @@ impl<'a> ThreeStateSyncronizer<'a> {
     }
 }
 
-impl<'a> SystemConfigSyncronizer for ThreeStateSyncronizer<'a> {
+impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
     type State = Vec<String>;
-    type UpDiff = ThreeStateUpDiff;
-    type DownDiff = ThreeStateDownDiff;
+    type UpDiff = ThreeStateUpDiff<'a>;
+    type DownDiff = ThreeStateDownDiff<'a>;
 
     fn get_current_config_state(&self, path: &Path) -> Result<Self::State, Box<dyn Error>> {
         // Initialize Tera and load config file from path
@@ -381,68 +404,28 @@ impl<'a> SystemConfigSyncronizer for ThreeStateSyncronizer<'a> {
         get_packages_from_command(&self.current_state_cmd)
     }
 
-    fn get_up_diff(&self, config_state: &Self::State) -> Result<ThreeStateUpDiff, Box<dyn Error>> {
+    fn get_up_diff(&'a self, config_state: &Self::State) -> Result<Self::UpDiff, Box<dyn Error>> {
         let installed_packages = get_packages_from_command(&self.installed_packages_cmd)?;
         let dependency_packages = get_packages_from_command(&self.dependency_packages_cmd)?;
 
         Ok(ThreeStateUpDiff {
+            parent_sync: self,
             to_install: compare_lists_only_in_first(config_state, &installed_packages),
             to_mark_explicit: compare_lists_in_both(config_state, &dependency_packages),
         })
     }
 
-    fn get_down_diff(&self, config_state: &Self::State) -> Result<ThreeStateDownDiff, Box<dyn Error>> {
+    fn get_down_diff(&'a self, config_state: &Self::State) -> Result<Self::DownDiff, Box<dyn Error>> {
         let explicitly_installed_packages = get_packages_from_command(&self.explicitly_installed_cmd)?;
         let explicitly_unrequired_packages = get_packages_from_command(&self.explicitly_unrequired_cmd)?;
         let explicitly_required_packages =
             compare_lists_only_in_first(&explicitly_installed_packages, &explicitly_unrequired_packages);
 
         Ok(ThreeStateDownDiff {
+            parent_sync: self,
             to_remove: compare_lists_only_in_first(&explicitly_unrequired_packages, config_state),
             to_mark_dependency: compare_lists_only_in_first(&explicitly_required_packages, config_state),
         })
-    }
-
-    fn report_up_diff(&self, up_diff: &Self::UpDiff) {
-        if !up_diff.to_install.is_empty() {
-            println!("{} {}", self.to_install_report_msg, up_diff.to_install.join(", "));
-        }
-        if !up_diff.to_mark_explicit.is_empty() {
-            println!(
-                "{} {}",
-                self.to_mark_explicit_report_msg,
-                up_diff.to_mark_explicit.join(", ")
-            );
-        }
-    }
-
-    fn report_down_diff(&self, down_diff: &Self::DownDiff) {
-        if !down_diff.to_remove.is_empty() {
-            println!("{} {}", self.to_remove_report_msg, down_diff.to_remove.join(", "));
-        }
-        if !down_diff.to_mark_dependency.is_empty() {
-            println!(
-                "{} {}",
-                self.to_mark_dependency_report_msg,
-                down_diff.to_mark_dependency.join(", ")
-            );
-        }
-    }
-
-    fn sync_up(&self, up_diff: Self::UpDiff) -> Result<(), Box<dyn Error>> {
-        run_cmd_with_list(self.global_config, &self.as_explicit_cmd, &up_diff.to_mark_explicit)?;
-        run_cmd_with_list(self.global_config, &self.install_cmd, &up_diff.to_install)?;
-        Ok(())
-    }
-
-    fn sync_down(&self, down_diff: Self::DownDiff) -> Result<(), Box<dyn Error>> {
-        run_cmd_with_list(
-            self.global_config,
-            &self.as_dependency_cmd,
-            &down_diff.to_mark_dependency,
-        )?;
-        run_cmd_with_list(self.global_config, &self.remove_cmd, &down_diff.to_remove)?;
-        Ok(())
     }
 
     fn pre_sync(&self) -> Result<(), Box<dyn Error>> {
@@ -452,6 +435,72 @@ impl<'a> SystemConfigSyncronizer for ThreeStateSyncronizer<'a> {
     fn post_sync(&self) -> Result<(), Box<dyn Error>> {
         let orphans = get_packages_from_command(&self.get_orphans_cmd)?;
         run_cmd_with_list(self.global_config, &self.remove_cmd, &orphans)
+    }
+}
+
+impl<'a> ConfigDiff for ThreeStateUpDiff<'a> {
+    fn report(&self) {
+        if !self.to_install.is_empty() {
+            println!(
+                "{} {}",
+                self.parent_sync.to_install_report_msg,
+                self.to_install.join(", ")
+            );
+        }
+        if !self.to_mark_explicit.is_empty() {
+            println!(
+                "{} {}",
+                self.parent_sync.to_mark_explicit_report_msg,
+                self.to_mark_explicit.join(", ")
+            );
+        }
+    }
+
+    fn sync(self) -> Result<(), Box<dyn Error>> {
+        run_cmd_with_list(
+            self.parent_sync.global_config,
+            &self.parent_sync.as_explicit_cmd,
+            &self.to_mark_explicit,
+        )?;
+        run_cmd_with_list(
+            self.parent_sync.global_config,
+            &self.parent_sync.install_cmd,
+            &self.to_install,
+        )?;
+        Ok(())
+    }
+}
+
+impl<'a> ConfigDiff for ThreeStateDownDiff<'a> {
+    fn report(&self) {
+        if !self.to_remove.is_empty() {
+            println!(
+                "{} {}",
+                self.parent_sync.to_remove_report_msg,
+                self.to_remove.join(", ")
+            );
+        }
+        if !self.to_mark_dependency.is_empty() {
+            println!(
+                "{} {}",
+                self.parent_sync.to_mark_dependency_report_msg,
+                self.to_mark_dependency.join(", ")
+            );
+        }
+    }
+
+    fn sync(self) -> Result<(), Box<dyn Error>> {
+        run_cmd_with_list(
+            self.parent_sync.global_config,
+            &self.parent_sync.as_dependency_cmd,
+            &self.to_mark_dependency,
+        )?;
+        run_cmd_with_list(
+            self.parent_sync.global_config,
+            &self.parent_sync.remove_cmd,
+            &self.to_remove,
+        )?;
+        Ok(())
     }
 }
 
