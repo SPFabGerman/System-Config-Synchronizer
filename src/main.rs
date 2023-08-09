@@ -8,8 +8,45 @@ use std::process::{Command, ExitCode, Stdio};
 use tera::{Context, Tera};
 use toml::Table;
 
-fn run_cmd<T: AsRef<OsStr>>(cmd: &[T]) -> Result<(), Box<dyn Error>> {
+struct GlobalConfig {
+    dry_mode: bool,
+    sudo_cmd: String,
+}
+
+impl GlobalConfig {
+    fn default() -> GlobalConfig {
+        GlobalConfig {
+            dry_mode: true,
+            sudo_cmd: "sudo".to_string(),
+        }
+    }
+
+    fn new(config: &toml::Table) -> Result<GlobalConfig, Box<dyn Error>> {
+        let mut gconfig = GlobalConfig::default();
+
+        for (k, v) in config {
+            match k.as_str() {
+                "sudo_cmd" => gconfig.sudo_cmd = v.as_str().ok_or("Value is not a String!")?.to_string(),
+                "dry_mode" => gconfig.dry_mode = v.as_bool().ok_or("Value is not a String!")?,
+                _ => {
+                    if !v.is_table() {
+                        eprintln!("Ignoring unknown key: {}", k);
+                    }
+                }
+            }
+        }
+
+        Ok(gconfig)
+    }
+}
+
+fn run_cmd(gconfig: &GlobalConfig, cmd: &[String]) -> Result<(), Box<dyn Error>> {
     if cmd.is_empty() {
+        return Ok(());
+    }
+
+    if gconfig.dry_mode {
+        println!("> {}", cmd.join(" "));
         return Ok(());
     }
 
@@ -21,8 +58,13 @@ fn run_cmd<T: AsRef<OsStr>>(cmd: &[T]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_cmd_with_list<T: AsRef<OsStr>>(cmd: &[T], list: &[T]) -> Result<(), Box<dyn Error>> {
+fn run_cmd_with_list(gconfig: &GlobalConfig, cmd: &[String], list: &[String]) -> Result<(), Box<dyn Error>> {
     if cmd.is_empty() || list.is_empty() {
+        return Ok(());
+    }
+
+    if gconfig.dry_mode {
+        println!("> {} {}", cmd.join(" "), list.join(" "));
         return Ok(());
     }
 
@@ -144,7 +186,8 @@ trait SystemConfigSyncronizer {
     }
 }
 
-struct ThreeStateSyncronizer {
+struct ThreeStateSyncronizer<'a> {
+    global_config: &'a GlobalConfig,
     current_state_cmd: Vec<String>,
     installed_packages_cmd: Vec<String>,
     dependency_packages_cmd: Vec<String>,
@@ -171,28 +214,29 @@ struct ThreeStateDownDiff {
     to_mark_dependency: Vec<String>,
 }
 
-fn pacman_default_config() -> ThreeStateSyncronizer {
+fn pacman_default_config(gconfig: &GlobalConfig) -> ThreeStateSyncronizer {
     ThreeStateSyncronizer {
+        global_config: gconfig,
         current_state_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
         installed_packages_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
         dependency_packages_cmd: vec!["pacman".to_string(), "-Qnqd".to_string()],
         explicitly_installed_cmd: vec!["pacman".to_string(), "-Qnqe".to_string()],
         explicitly_unrequired_cmd: vec!["pacman".to_string(), "-Qnqet".to_string()],
         as_explicit_cmd: vec![
-            "doas".to_string(),
+            gconfig.sudo_cmd.clone(),
             "pacman".to_string(),
             "-D".to_string(),
             "--asexplicit".to_string(),
         ],
         install_cmd: vec!["doas".to_string(), "pacman".to_string(), "-S".to_string()],
         as_dependency_cmd: vec![
-            "doas".to_string(),
+            gconfig.sudo_cmd.clone(),
             "pacman".to_string(),
             "-D".to_string(),
             "--asdeps".to_string(),
         ],
-        remove_cmd: vec!["doas".to_string(), "pacman".to_string(), "-Rs".to_string()],
-        update_cmd: vec!["doas".to_string(), "pacman".to_string(), "-Syu".to_string()],
+        remove_cmd: vec![gconfig.sudo_cmd.clone(), "pacman".to_string(), "-Rs".to_string()],
+        update_cmd: vec![gconfig.sudo_cmd.clone(), "pacman".to_string(), "-Syu".to_string()],
         get_orphans_cmd: vec!["pacman".to_string(), "-Qnqdt".to_string()],
         get_group_packages_cmd: vec!["pacman".to_string(), "-Sqg".to_string()],
         to_install_report_msg: "Packages to install:".to_string(),
@@ -219,8 +263,11 @@ fn toml_value_to_cmd_array(val: &toml::Value) -> Result<Vec<String>, Box<dyn Err
     }
 }
 
-fn new_pacman(config: &toml::Table) -> Result<ThreeStateSyncronizer, Box<dyn Error>> {
-    let mut pacman_config = pacman_default_config();
+fn new_pacman<'a>(
+    gconfig: &'a GlobalConfig,
+    config: &toml::Table,
+) -> Result<ThreeStateSyncronizer<'a>, Box<dyn Error>> {
+    let mut pacman_config = pacman_default_config(gconfig);
 
     for (k, v) in config {
         match k.as_str() {
@@ -255,7 +302,7 @@ fn new_pacman(config: &toml::Table) -> Result<ThreeStateSyncronizer, Box<dyn Err
     Ok(pacman_config)
 }
 
-impl ThreeStateSyncronizer {
+impl<'a> ThreeStateSyncronizer<'a> {
     fn get_group_packages(
         cmd: &[String],
         args: &HashMap<std::string::String, tera::Value>,
@@ -295,7 +342,7 @@ impl ThreeStateSyncronizer {
     }
 }
 
-impl SystemConfigSyncronizer for ThreeStateSyncronizer {
+impl<'a> SystemConfigSyncronizer for ThreeStateSyncronizer<'a> {
     type State = Vec<String>;
     type UpDiff = ThreeStateUpDiff;
     type DownDiff = ThreeStateDownDiff;
@@ -383,24 +430,28 @@ impl SystemConfigSyncronizer for ThreeStateSyncronizer {
     }
 
     fn sync_up(&self, up_diff: Self::UpDiff) -> Result<(), Box<dyn Error>> {
-        run_cmd_with_list(&self.as_explicit_cmd, &up_diff.to_mark_explicit)?;
-        run_cmd_with_list(&self.install_cmd, &up_diff.to_install)?;
+        run_cmd_with_list(self.global_config, &self.as_explicit_cmd, &up_diff.to_mark_explicit)?;
+        run_cmd_with_list(self.global_config, &self.install_cmd, &up_diff.to_install)?;
         Ok(())
     }
 
     fn sync_down(&self, down_diff: Self::DownDiff) -> Result<(), Box<dyn Error>> {
-        run_cmd_with_list(&self.as_dependency_cmd, &down_diff.to_mark_dependency)?;
-        run_cmd_with_list(&self.remove_cmd, &down_diff.to_remove)?;
+        run_cmd_with_list(
+            self.global_config,
+            &self.as_dependency_cmd,
+            &down_diff.to_mark_dependency,
+        )?;
+        run_cmd_with_list(self.global_config, &self.remove_cmd, &down_diff.to_remove)?;
         Ok(())
     }
 
     fn pre_sync(&self) -> Result<(), Box<dyn Error>> {
-        run_cmd(&self.update_cmd)
+        run_cmd(self.global_config, &self.update_cmd)
     }
 
     fn post_sync(&self) -> Result<(), Box<dyn Error>> {
         let orphans = get_packages_from_command(&self.get_orphans_cmd)?;
-        run_cmd_with_list(&self.remove_cmd, &orphans)
+        run_cmd_with_list(self.global_config, &self.remove_cmd, &orphans)
     }
 }
 
@@ -440,6 +491,17 @@ fn main() -> ExitCode {
         }
     };
 
+    let global_config = match GlobalConfig::new(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Error in Global Configuration: {}",
+                error_pretty_print(e.as_ref(), false)
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
     let pacman_config = match config.get("pacman") {
         Some(toml::Value::Table(x)) => x,
         _ => {
@@ -448,7 +510,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let pacman_config = match new_pacman(pacman_config) {
+    let pacman_config = match new_pacman(&global_config, pacman_config) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error in Pacman Config: {}", error_pretty_print(e.as_ref(), false));
