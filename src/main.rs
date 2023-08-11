@@ -10,29 +10,52 @@ use toml::Table;
 
 struct GlobalConfig {
     dry_mode: bool,
+    show_cmds: bool,
+    show_cmds_in_dry_mode: bool,
+    show_reports: bool,
     sudo_cmd: String,
+    error_on_unknown_keys: bool,
 }
 
 impl GlobalConfig {
     fn default() -> GlobalConfig {
         GlobalConfig {
             dry_mode: true,
+            show_cmds: true,
+            show_cmds_in_dry_mode: true,
+            show_reports: true,
             sudo_cmd: "sudo".to_string(),
+            error_on_unknown_keys: true,
         }
     }
 
     fn new(config: &toml::Table) -> Result<GlobalConfig, Box<dyn Error>> {
         let mut gconfig = GlobalConfig::default();
 
+        let mut found_unknown_key = false;
         for (k, v) in config {
             match k.as_str() {
                 "sudo_cmd" => gconfig.sudo_cmd = v.as_str().ok_or("Value is not a String!")?.to_string(),
-                "dry_mode" => gconfig.dry_mode = v.as_bool().ok_or("Value is not a String!")?,
+                "dry_mode" => gconfig.dry_mode = v.as_bool().ok_or("Value is not a Bool!")?,
+                "show_cmds" => gconfig.show_cmds = v.as_bool().ok_or("Value is not a Bool!")?,
+                "show_cmds_in_dry_mode" => gconfig.show_cmds_in_dry_mode = v.as_bool().ok_or("Value is not a Bool!")?,
+                "show_reports" => gconfig.show_reports = v.as_bool().ok_or("Value is not a Bool!")?,
+                "error_on_unknown_keys" => gconfig.error_on_unknown_keys = v.as_bool().ok_or("Value is not a Bool!")?,
                 _ => {
                     if !v.is_table() {
-                        eprintln!("Ignoring unknown key: {}", k);
+                        // Ignore tables, since they are not global configurations anymore
+                        eprintln!("Unknown key in global configuration: {}", k);
+                        found_unknown_key = true;
                     }
                 }
+            }
+        }
+
+        if found_unknown_key {
+            if gconfig.error_on_unknown_keys {
+                return Err("Usage of unknown keys is not allowed.".into());
+            } else {
+                eprintln!("Ignoring all unknown keys.");
             }
         }
 
@@ -45,8 +68,11 @@ fn run_cmd(gconfig: &GlobalConfig, cmd: &[String]) -> Result<(), Box<dyn Error>>
         return Ok(());
     }
 
-    if gconfig.dry_mode {
+    if gconfig.show_cmds || (gconfig.dry_mode && gconfig.show_cmds_in_dry_mode) {
         println!("> {}", cmd.join(" "));
+    }
+
+    if gconfig.dry_mode {
         return Ok(());
     }
 
@@ -63,8 +89,11 @@ fn run_cmd_with_list(gconfig: &GlobalConfig, cmd: &[String], list: &[String]) ->
         return Ok(());
     }
 
-    if gconfig.dry_mode {
+    if gconfig.show_cmds || (gconfig.dry_mode && gconfig.show_cmds_in_dry_mode) {
         println!("> {} {}", cmd.join(" "), list.join(" "));
+    }
+
+    if gconfig.dry_mode {
         return Ok(());
     }
 
@@ -138,6 +167,16 @@ fn compare_lists_in_both(l1: &[String], l2: &[String]) -> Vec<String> {
         .filter(|item| l2.binary_search(item).is_ok())
         .cloned()
         .collect()
+}
+
+fn report(gconfig: &GlobalConfig, msg: &String, objects: &[String], seperator: &str) {
+    if !gconfig.show_reports {
+        return;
+    }
+
+    if !objects.is_empty() {
+        println!("{} {}", msg, objects.join(seperator));
+    }
 }
 
 trait ConfigDiff {
@@ -292,6 +331,7 @@ fn new_pacman<'a>(
 ) -> Result<ThreeStateSyncronizer<'a>, Box<dyn Error>> {
     let mut pacman_config = pacman_default_config(gconfig);
 
+    let mut found_unknown_key = false;
     for (k, v) in config {
         match k.as_str() {
             "current_state_cmd" => pacman_config.current_state_cmd = toml_value_to_cmd_array(v)?,
@@ -318,7 +358,18 @@ fn new_pacman<'a>(
             "to_mark_dependency_report_msg" => {
                 pacman_config.to_mark_dependency_report_msg = v.as_str().ok_or("Value is not a String!")?.to_string()
             }
-            _ => eprintln!("Ignoring unknown key: {}", k),
+            _ => {
+                eprintln!("Unknown key: {}", k);
+                found_unknown_key = true;
+            }
+        }
+    }
+
+    if found_unknown_key {
+        if gconfig.error_on_unknown_keys {
+            return Err("Usage of unknown keys is not allowed.".into());
+        } else {
+            eprintln!("Ignoring all unknown keys.");
         }
     }
 
@@ -440,20 +491,18 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
 
 impl<'a> ConfigDiff for ThreeStateUpDiff<'a> {
     fn report(&self) {
-        if !self.to_install.is_empty() {
-            println!(
-                "{} {}",
-                self.parent_sync.to_install_report_msg,
-                self.to_install.join(", ")
-            );
-        }
-        if !self.to_mark_explicit.is_empty() {
-            println!(
-                "{} {}",
-                self.parent_sync.to_mark_explicit_report_msg,
-                self.to_mark_explicit.join(", ")
-            );
-        }
+        report(
+            self.parent_sync.global_config,
+            &self.parent_sync.to_install_report_msg,
+            &self.to_install,
+            ", ",
+        );
+        report(
+            self.parent_sync.global_config,
+            &self.parent_sync.to_mark_explicit_report_msg,
+            &self.to_mark_explicit,
+            ", ",
+        );
     }
 
     fn sync(self) -> Result<(), Box<dyn Error>> {
@@ -473,20 +522,18 @@ impl<'a> ConfigDiff for ThreeStateUpDiff<'a> {
 
 impl<'a> ConfigDiff for ThreeStateDownDiff<'a> {
     fn report(&self) {
-        if !self.to_remove.is_empty() {
-            println!(
-                "{} {}",
-                self.parent_sync.to_remove_report_msg,
-                self.to_remove.join(", ")
-            );
-        }
-        if !self.to_mark_dependency.is_empty() {
-            println!(
-                "{} {}",
-                self.parent_sync.to_mark_dependency_report_msg,
-                self.to_mark_dependency.join(", ")
-            );
-        }
+        report(
+            self.parent_sync.global_config,
+            &self.parent_sync.to_remove_report_msg,
+            &self.to_remove,
+            ", ",
+        );
+        report(
+            self.parent_sync.global_config,
+            &self.parent_sync.to_mark_dependency_report_msg,
+            &self.to_mark_dependency,
+            ", ",
+        );
     }
 
     fn sync(self) -> Result<(), Box<dyn Error>> {
