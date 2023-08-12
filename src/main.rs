@@ -8,6 +8,8 @@ use std::process::{Command, ExitCode, Stdio};
 use tera::{Context, Tera};
 use toml::Table;
 
+type AResult<T> = Result<T, Box<dyn Error>>;
+
 struct GlobalConfig {
     dry_mode: bool,
     show_cmds: bool,
@@ -29,7 +31,7 @@ impl GlobalConfig {
         }
     }
 
-    fn new(config: &toml::Table) -> Result<GlobalConfig, Box<dyn Error>> {
+    fn new(config: &toml::Table) -> AResult<GlobalConfig> {
         let mut gconfig = GlobalConfig::default();
 
         let mut found_unknown_key = false;
@@ -63,7 +65,7 @@ impl GlobalConfig {
     }
 }
 
-fn run_cmd(gconfig: &GlobalConfig, cmd: &[String]) -> Result<(), Box<dyn Error>> {
+fn run_cmd(gconfig: &GlobalConfig, cmd: &[String]) -> AResult<()> {
     if cmd.is_empty() {
         return Ok(());
     }
@@ -84,7 +86,7 @@ fn run_cmd(gconfig: &GlobalConfig, cmd: &[String]) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-fn run_cmd_with_list(gconfig: &GlobalConfig, cmd: &[String], list: &[String]) -> Result<(), Box<dyn Error>> {
+fn run_cmd_with_list(gconfig: &GlobalConfig, cmd: &[String], list: &[String]) -> AResult<()> {
     if cmd.is_empty() || list.is_empty() {
         return Ok(());
     }
@@ -105,7 +107,7 @@ fn run_cmd_with_list(gconfig: &GlobalConfig, cmd: &[String], list: &[String]) ->
     Ok(())
 }
 
-fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> Result<Vec<String>, Box<dyn Error>> {
+fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> AResult<Vec<String>> {
     if cmd.is_empty() {
         return Ok(Vec::new());
     }
@@ -128,7 +130,7 @@ fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> Result<Vec<String>, 
     Ok(package_list)
 }
 
-fn get_packages_from_command_with_list<T: AsRef<OsStr>>(cmd: &[T], list: &[T]) -> Result<Vec<String>, Box<dyn Error>> {
+fn get_packages_from_command_with_list<T: AsRef<OsStr>>(cmd: &[T], list: &[T]) -> AResult<Vec<String>> {
     if cmd.is_empty() || list.is_empty() {
         return Ok(Vec::new());
     }
@@ -178,76 +180,68 @@ fn report(gconfig: &GlobalConfig, msg: &String, objects: &[String], seperator: &
 
 trait ConfigDiff {
     fn report(&self);
-    fn sync(self) -> Result<(), Box<dyn Error>>;
+    fn sync(self) -> AResult<()>;
 }
 
 trait SystemConfigSyncronizer<'a> {
     type State;
     type UpDiff: ConfigDiff;
     type DownDiff: ConfigDiff;
-    fn get_current_config_state(&self) -> Result<Self::State, Box<dyn Error>>;
-    fn get_current_system_state(&self) -> Result<Self::State, Box<dyn Error>>;
-    fn get_up_diff(&'a self, config_state: &Self::State) -> Result<Self::UpDiff, Box<dyn Error>>;
-    fn get_down_diff(&'a self, config_state: &Self::State) -> Result<Self::DownDiff, Box<dyn Error>>;
-    fn pre_sync(&self) -> Result<(), Box<dyn Error>> {
+    fn get_current_config_state(&self) -> AResult<Self::State>;
+    fn get_current_system_state(&self) -> AResult<Self::State>;
+    fn get_up_diff(&'a self, config_state: &Self::State) -> AResult<Self::UpDiff>;
+    fn get_down_diff(&'a self, config_state: &Self::State) -> AResult<Self::DownDiff>;
+    fn pre_sync(&self) -> AResult<()> {
         Ok(())
     }
-    fn post_sync(&self) -> Result<(), Box<dyn Error>> {
+    fn post_sync(&self) -> AResult<()> {
         Ok(())
     }
 
-    fn sync_up(&'a self) -> Result<(), Box<dyn Error>> {
-        let config_state = self.get_current_config_state()?;
-        let up_diff = self.get_up_diff(&config_state)?;
+    fn sync_up(&'a self, config_state: &Self::State) -> AResult<()> {
+        let up_diff = self.get_up_diff(config_state)?;
         up_diff.report();
         up_diff.sync()?;
         Ok(())
     }
 
-    fn sync_down(&'a self) -> Result<(), Box<dyn Error>> {
-        let config_state = self.get_current_config_state()?;
-        let down_diff = self.get_down_diff(&config_state)?;
+    fn sync_down(&'a self, config_state: &Self::State) -> AResult<()> {
+        let down_diff = self.get_down_diff(config_state)?;
         down_diff.report();
         down_diff.sync()?;
         Ok(())
     }
 
-    fn sync_up_full(&'a self) -> Result<(), Box<dyn Error>> {
-        self.pre_sync()?;
-        self.sync_up()?;
-        self.post_sync()?;
-        Ok(())
-    }
-
-    fn sync_down_full(&'a self) -> Result<(), Box<dyn Error>> {
-        self.pre_sync()?;
-        self.sync_down()?;
-        self.post_sync()?;
-        Ok(())
-    }
-
-    fn sync_up_down(&'a self) -> Result<(), Box<dyn Error>> {
+    fn sync_up_only(&'a self) -> AResult<()> {
         self.pre_sync()?;
         let config_state = self.get_current_config_state()?;
-        let up_diff = self.get_up_diff(&config_state)?;
-        up_diff.report();
-        up_diff.sync()?;
-        let down_diff = self.get_down_diff(&config_state)?;
-        down_diff.report();
-        down_diff.sync()?;
+        self.sync_up(&config_state)?;
         self.post_sync()?;
         Ok(())
     }
 
-    fn sync_down_up(&'a self) -> Result<(), Box<dyn Error>> {
+    fn sync_down_only(&'a self) -> AResult<()> {
         self.pre_sync()?;
         let config_state = self.get_current_config_state()?;
-        let down_diff = self.get_down_diff(&config_state)?;
-        down_diff.report();
-        down_diff.sync()?;
-        let up_diff = self.get_up_diff(&config_state)?;
-        up_diff.report();
-        up_diff.sync()?;
+        self.sync_down(&config_state)?;
+        self.post_sync()?;
+        Ok(())
+    }
+
+    fn sync_up_down(&'a self) -> AResult<()> {
+        self.pre_sync()?;
+        let config_state = self.get_current_config_state()?;
+        self.sync_up(&config_state)?;
+        self.sync_down(&config_state)?;
+        self.post_sync()?;
+        Ok(())
+    }
+
+    fn sync_down_up(&'a self) -> AResult<()> {
+        self.pre_sync()?;
+        let config_state = self.get_current_config_state()?;
+        self.sync_down(&config_state)?;
+        self.sync_up(&config_state)?;
         self.post_sync()?;
         Ok(())
     }
@@ -317,7 +311,7 @@ fn pacman_default_config(gconfig: &GlobalConfig) -> ThreeStateSyncronizer {
     }
 }
 
-fn toml_value_to_cmd_array(val: &toml::Value) -> Result<Vec<String>, Box<dyn Error>> {
+fn toml_value_to_cmd_array(val: &toml::Value) -> AResult<Vec<String>> {
     match val {
         toml::Value::String(s) => Ok(s.split_whitespace().map(String::from).collect()),
         toml::Value::Array(arr) => {
@@ -334,10 +328,7 @@ fn toml_value_to_cmd_array(val: &toml::Value) -> Result<Vec<String>, Box<dyn Err
     }
 }
 
-fn new_pacman<'a>(
-    gconfig: &'a GlobalConfig,
-    config: &toml::Table,
-) -> Result<ThreeStateSyncronizer<'a>, Box<dyn Error>> {
+fn new_pacman<'a>(gconfig: &'a GlobalConfig, config: &toml::Table) -> AResult<ThreeStateSyncronizer<'a>> {
     let mut pacman_config = pacman_default_config(gconfig);
 
     let mut found_unknown_key = false;
@@ -390,7 +381,7 @@ impl<'a> ThreeStateSyncronizer<'a> {
     fn get_group_packages(
         cmd: &[String],
         args: &HashMap<std::string::String, tera::Value>,
-    ) -> Result<tera::Value, tera::Error> {
+    ) -> core::result::Result<tera::Value, tera::Error> {
         let groupname = match args.get("name") {
             Some(val) => val.clone(),
             None => return Err("No group was specified".into()),
@@ -431,7 +422,7 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
     type UpDiff = ThreeStateUpDiff<'a>;
     type DownDiff = ThreeStateDownDiff<'a>;
 
-    fn get_current_config_state(&self) -> Result<Self::State, Box<dyn Error>> {
+    fn get_current_config_state(&self) -> AResult<Self::State> {
         // Initialize Tera and load config file from path
         let mut tera = Tera::default();
         let path = Path::new(&self.config_path);
@@ -448,7 +439,7 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
         tera.register_function(
             "group",
             Box::new(
-                move |args: &HashMap<std::string::String, tera::Value>| -> Result<tera::Value, tera::Error> {
+                move |args: &HashMap<std::string::String, tera::Value>| -> core::result::Result<tera::Value, tera::Error> {
                     ThreeStateSyncronizer::get_group_packages(&cmd, args)
                 },
             ),
@@ -462,11 +453,11 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
         Ok(package_list)
     }
 
-    fn get_current_system_state(&self) -> Result<Self::State, Box<dyn Error>> {
+    fn get_current_system_state(&self) -> AResult<Self::State> {
         get_packages_from_command(&self.current_state_cmd)
     }
 
-    fn get_up_diff(&'a self, config_state: &Self::State) -> Result<Self::UpDiff, Box<dyn Error>> {
+    fn get_up_diff(&'a self, config_state: &Self::State) -> AResult<Self::UpDiff> {
         let installed_packages = get_packages_from_command(&self.installed_packages_cmd)?;
         let dependency_packages = get_packages_from_command(&self.dependency_packages_cmd)?;
 
@@ -477,7 +468,7 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
         })
     }
 
-    fn get_down_diff(&'a self, config_state: &Self::State) -> Result<Self::DownDiff, Box<dyn Error>> {
+    fn get_down_diff(&'a self, config_state: &Self::State) -> AResult<Self::DownDiff> {
         let explicitly_installed_packages = get_packages_from_command(&self.explicitly_installed_cmd)?;
         let explicitly_unrequired_packages = get_packages_from_command(&self.explicitly_unrequired_cmd)?;
         let explicitly_required_packages =
@@ -490,11 +481,11 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
         })
     }
 
-    fn pre_sync(&self) -> Result<(), Box<dyn Error>> {
+    fn pre_sync(&self) -> AResult<()> {
         run_cmd(self.global_config, &self.update_cmd)
     }
 
-    fn post_sync(&self) -> Result<(), Box<dyn Error>> {
+    fn post_sync(&self) -> AResult<()> {
         let orphans = get_packages_from_command(&self.get_orphans_cmd)?;
         run_cmd_with_list(self.global_config, &self.remove_cmd, &orphans)
     }
@@ -516,7 +507,7 @@ impl<'a> ConfigDiff for ThreeStateUpDiff<'a> {
         );
     }
 
-    fn sync(self) -> Result<(), Box<dyn Error>> {
+    fn sync(self) -> AResult<()> {
         run_cmd_with_list(
             self.parent_sync.global_config,
             &self.parent_sync.as_explicit_cmd,
@@ -547,7 +538,7 @@ impl<'a> ConfigDiff for ThreeStateDownDiff<'a> {
         );
     }
 
-    fn sync(self) -> Result<(), Box<dyn Error>> {
+    fn sync(self) -> AResult<()> {
         run_cmd_with_list(
             self.parent_sync.global_config,
             &self.parent_sync.as_dependency_cmd,
