@@ -107,7 +107,7 @@ fn run_cmd_with_list(gconfig: &GlobalConfig, cmd: &[String], list: &[String]) ->
 
 fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> Result<Vec<String>, Box<dyn Error>> {
     if cmd.is_empty() {
-        return Err(Box::from("No command was specified!"));
+        return Ok(Vec::new());
     }
 
     let mut cmd_proc = Command::new(&cmd[0])
@@ -129,10 +129,7 @@ fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> Result<Vec<String>, 
 }
 
 fn get_packages_from_command_with_list<T: AsRef<OsStr>>(cmd: &[T], list: &[T]) -> Result<Vec<String>, Box<dyn Error>> {
-    if cmd.is_empty() {
-        return Err(Box::from("No command was specified!"));
-    }
-    if list.is_empty() {
+    if cmd.is_empty() || list.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -188,7 +185,7 @@ trait SystemConfigSyncronizer<'a> {
     type State;
     type UpDiff: ConfigDiff;
     type DownDiff: ConfigDiff;
-    fn get_current_config_state(&self, path: &Path) -> Result<Self::State, Box<dyn Error>>;
+    fn get_current_config_state(&self) -> Result<Self::State, Box<dyn Error>>;
     fn get_current_system_state(&self) -> Result<Self::State, Box<dyn Error>>;
     fn get_up_diff(&'a self, config_state: &Self::State) -> Result<Self::UpDiff, Box<dyn Error>>;
     fn get_down_diff(&'a self, config_state: &Self::State) -> Result<Self::DownDiff, Box<dyn Error>>;
@@ -199,19 +196,42 @@ trait SystemConfigSyncronizer<'a> {
         Ok(())
     }
 
-    fn sync_up(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
-        let config_state = self.get_current_config_state(path)?;
-        self.pre_sync()?;
+    fn sync_up(&'a self) -> Result<(), Box<dyn Error>> {
+        let config_state = self.get_current_config_state()?;
         let up_diff = self.get_up_diff(&config_state)?;
         up_diff.report();
         up_diff.sync()?;
+        Ok(())
+    }
+
+    fn sync_down(&'a self) -> Result<(), Box<dyn Error>> {
+        let config_state = self.get_current_config_state()?;
+        let down_diff = self.get_down_diff(&config_state)?;
+        down_diff.report();
+        down_diff.sync()?;
+        Ok(())
+    }
+
+    fn sync_up_full(&'a self) -> Result<(), Box<dyn Error>> {
+        self.pre_sync()?;
+        self.sync_up()?;
         self.post_sync()?;
         Ok(())
     }
 
-    fn sync_down(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
-        let config_state = self.get_current_config_state(path)?;
+    fn sync_down_full(&'a self) -> Result<(), Box<dyn Error>> {
         self.pre_sync()?;
+        self.sync_down()?;
+        self.post_sync()?;
+        Ok(())
+    }
+
+    fn sync_up_down(&'a self) -> Result<(), Box<dyn Error>> {
+        self.pre_sync()?;
+        let config_state = self.get_current_config_state()?;
+        let up_diff = self.get_up_diff(&config_state)?;
+        up_diff.report();
+        up_diff.sync()?;
         let down_diff = self.get_down_diff(&config_state)?;
         down_diff.report();
         down_diff.sync()?;
@@ -219,22 +239,9 @@ trait SystemConfigSyncronizer<'a> {
         Ok(())
     }
 
-    fn sync_up_down(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
-        let config_state = self.get_current_config_state(path)?;
+    fn sync_down_up(&'a self) -> Result<(), Box<dyn Error>> {
         self.pre_sync()?;
-        let up_diff = self.get_up_diff(&config_state)?;
-        up_diff.report();
-        up_diff.sync()?;
-        let down_diff = self.get_down_diff(&config_state)?;
-        down_diff.report();
-        down_diff.sync()?;
-        self.post_sync()?;
-        Ok(())
-    }
-
-    fn sync_down_up(&'a self, path: &Path) -> Result<(), Box<dyn Error>> {
-        let config_state = self.get_current_config_state(path)?;
-        self.pre_sync()?;
+        let config_state = self.get_current_config_state()?;
         let down_diff = self.get_down_diff(&config_state)?;
         down_diff.report();
         down_diff.sync()?;
@@ -248,6 +255,7 @@ trait SystemConfigSyncronizer<'a> {
 
 struct ThreeStateSyncronizer<'a> {
     global_config: &'a GlobalConfig,
+    config_path: String,
     current_state_cmd: Vec<String>,
     installed_packages_cmd: Vec<String>,
     dependency_packages_cmd: Vec<String>,
@@ -279,6 +287,7 @@ struct ThreeStateDownDiff<'a> {
 fn pacman_default_config(gconfig: &GlobalConfig) -> ThreeStateSyncronizer {
     ThreeStateSyncronizer {
         global_config: gconfig,
+        config_path: "current_packages".to_string(),
         current_state_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
         installed_packages_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
         dependency_packages_cmd: vec!["pacman".to_string(), "-Qnqd".to_string()],
@@ -334,6 +343,7 @@ fn new_pacman<'a>(
     let mut found_unknown_key = false;
     for (k, v) in config {
         match k.as_str() {
+            "config_path" => pacman_config.config_path = v.as_str().ok_or("Value is not a String!")?.to_string(),
             "current_state_cmd" => pacman_config.current_state_cmd = toml_value_to_cmd_array(v)?,
             "installed_packages_cmd" => pacman_config.installed_packages_cmd = toml_value_to_cmd_array(v)?,
             "dependency_packages_cmd" => pacman_config.dependency_packages_cmd = toml_value_to_cmd_array(v)?,
@@ -421,9 +431,10 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
     type UpDiff = ThreeStateUpDiff<'a>;
     type DownDiff = ThreeStateDownDiff<'a>;
 
-    fn get_current_config_state(&self, path: &Path) -> Result<Self::State, Box<dyn Error>> {
+    fn get_current_config_state(&self) -> Result<Self::State, Box<dyn Error>> {
         // Initialize Tera and load config file from path
         let mut tera = Tera::default();
+        let path = Path::new(&self.config_path);
         tera.add_template_file(path, Some("config_file"))?;
 
         // Setup functions and variables
@@ -572,13 +583,26 @@ fn error_pretty_print(err: &dyn Error, skip_first: bool) -> String {
 }
 
 fn main() -> ExitCode {
-    let config = match fs::read_to_string("config.toml") {
+    let config_path = match std::env::var("SCS_GLOBAL_CONFIG") {
+        Ok(p) => p,
+        Err(std::env::VarError::NotPresent) => "config.toml".to_string(),
+        Err(e) => {
+            eprintln!(
+                "Error reading environment variable SCS_GLOBAL_CONFIG: {}",
+                error_pretty_print(&e, false)
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let config = match fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error reading config file: {}", error_pretty_print(&e, false));
             return ExitCode::FAILURE;
         }
     };
+
     let config = match config.parse::<Table>() {
         Ok(c) => c,
         Err(e) => {
@@ -613,7 +637,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = pacman_config.sync_up_down(Path::new("current_packages")) {
+
+    if let Err(e) = pacman_config.sync_up_down() {
         eprintln!("Error syncronizing: {}", error_pretty_print(e.as_ref(), false));
         return ExitCode::FAILURE;
     }
