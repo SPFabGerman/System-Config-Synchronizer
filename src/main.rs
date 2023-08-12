@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsStr;
-use std::fs::{self};
-use std::io::{self, BufRead};
+use std::fs::{self, File};
+use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use tera::{Context, Tera};
@@ -189,6 +189,7 @@ trait SystemConfigSyncronizer<'a> {
     type DownDiff: ConfigDiff;
     fn get_current_config_state(&self) -> AResult<Self::State>;
     fn get_current_system_state(&self) -> AResult<Self::State>;
+    fn write_state_to_file(&self, state: &Self::State) -> AResult<()>;
     fn get_up_diff(&'a self, config_state: &Self::State) -> AResult<Self::UpDiff>;
     fn get_down_diff(&'a self, config_state: &Self::State) -> AResult<Self::DownDiff>;
     fn pre_sync(&self) -> AResult<()> {
@@ -250,7 +251,6 @@ trait SystemConfigSyncronizer<'a> {
 struct ThreeStateSyncronizer<'a> {
     global_config: &'a GlobalConfig,
     config_path: String,
-    current_state_cmd: Vec<String>,
     installed_packages_cmd: Vec<String>,
     dependency_packages_cmd: Vec<String>,
     explicitly_installed_cmd: Vec<String>,
@@ -282,7 +282,6 @@ fn pacman_default_config(gconfig: &GlobalConfig) -> ThreeStateSyncronizer {
     ThreeStateSyncronizer {
         global_config: gconfig,
         config_path: "current_packages".to_string(),
-        current_state_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
         installed_packages_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
         dependency_packages_cmd: vec!["pacman".to_string(), "-Qnqd".to_string()],
         explicitly_installed_cmd: vec!["pacman".to_string(), "-Qnqe".to_string()],
@@ -335,7 +334,6 @@ fn new_pacman<'a>(gconfig: &'a GlobalConfig, config: &toml::Table) -> AResult<Th
     for (k, v) in config {
         match k.as_str() {
             "config_path" => pacman_config.config_path = v.as_str().ok_or("Value is not a String!")?.to_string(),
-            "current_state_cmd" => pacman_config.current_state_cmd = toml_value_to_cmd_array(v)?,
             "installed_packages_cmd" => pacman_config.installed_packages_cmd = toml_value_to_cmd_array(v)?,
             "dependency_packages_cmd" => pacman_config.dependency_packages_cmd = toml_value_to_cmd_array(v)?,
             "explicitly_installed_cmd" => pacman_config.explicitly_installed_cmd = toml_value_to_cmd_array(v)?,
@@ -454,7 +452,14 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
     }
 
     fn get_current_system_state(&self) -> AResult<Self::State> {
-        get_packages_from_command(&self.current_state_cmd)
+        get_packages_from_command(&self.explicitly_installed_cmd)
+    }
+
+    fn write_state_to_file(&self, state: &Self::State) -> AResult<()> {
+        let path = Path::new(&self.config_path);
+        let mut file = File::create(path)?;
+        file.write_all(&state.join("\n").into_bytes())?;
+        Ok(())
     }
 
     fn get_up_diff(&'a self, config_state: &Self::State) -> AResult<Self::UpDiff> {
@@ -633,6 +638,19 @@ fn main() -> ExitCode {
         eprintln!("Error syncronizing: {}", error_pretty_print(e.as_ref(), false));
         return ExitCode::FAILURE;
     }
+
+    // let state = match pacman_config.get_current_system_state() {
+    //     Ok(s) => s,
+    //     Err(e) => {
+    //         eprintln!("Error retrieving system state: {}", error_pretty_print(e.as_ref(), false));
+    //         return ExitCode::FAILURE;
+    //     }
+    // };
+
+    // if let Err(e) = pacman_config.write_state_to_file(&state) {
+    //     eprintln!("Error writing state to file: {}", error_pretty_print(e.as_ref(), false));
+    //     return ExitCode::FAILURE;
+    // }
 
     ExitCode::SUCCESS
 }
