@@ -20,6 +20,7 @@ struct GlobalConfig {
     sudo_cmd: String,
     error_on_unknown_keys: bool,
     warn_on_duplicates: bool,
+    comment_string: String,
 }
 
 impl GlobalConfig {
@@ -32,6 +33,7 @@ impl GlobalConfig {
             sudo_cmd: "sudo".to_string(),
             error_on_unknown_keys: true,
             warn_on_duplicates: true,
+            comment_string: "#".to_string(),
         }
     }
 
@@ -48,6 +50,7 @@ impl GlobalConfig {
                 "show_reports" => gconfig.show_reports = v.as_bool().ok_or("Value is not a Bool!")?,
                 "error_on_unknown_keys" => gconfig.error_on_unknown_keys = v.as_bool().ok_or("Value is not a Bool!")?,
                 "warn_on_duplicates" => gconfig.warn_on_duplicates = v.as_bool().ok_or("Value is not a Bool!")?,
+                "comment_string" => gconfig.comment_string = v.as_str().ok_or("Value is not a String!")?.to_string(),
                 _ => {
                     if !v.is_table() {
                         // Ignore tables, since they are not global configurations anymore
@@ -475,8 +478,11 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
         let mut package_list: Vec<String> = render
             .lines()
             .filter_map(|s| {
-                // Remove whitespace and empty lines
-                let s = s.trim();
+                // Remove Comments, whitespace and empty lines
+                let s = s
+                    .find(&self.global_config.comment_string)
+                    .map_or(s, |idx| &s[..idx])
+                    .trim();
                 s.is_empty().not().then(|| s.to_string())
             })
             .collect();
