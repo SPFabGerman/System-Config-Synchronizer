@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
+use std::ops::Not;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use tera::{Context, Tera};
@@ -471,7 +472,14 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
 
         // Read config file and map to array
         let render = tera.render("config_file", &context)?;
-        let mut package_list: Vec<String> = render.lines().map(String::from).collect();
+        let mut package_list: Vec<String> = render
+            .lines()
+            .filter_map(|s| {
+                // Remove whitespace and empty lines
+                let s = s.trim();
+                s.is_empty().not().then(|| s.to_string())
+            })
+            .collect();
         cleanup_package_list(self.global_config, &mut package_list);
 
         Ok(package_list)
