@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsStr;
+use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -17,6 +18,7 @@ struct GlobalConfig {
     show_reports: bool,
     sudo_cmd: String,
     error_on_unknown_keys: bool,
+    warn_on_duplicates: bool,
 }
 
 impl GlobalConfig {
@@ -28,6 +30,7 @@ impl GlobalConfig {
             show_reports: true,
             sudo_cmd: "sudo".to_string(),
             error_on_unknown_keys: true,
+            warn_on_duplicates: true,
         }
     }
 
@@ -43,6 +46,7 @@ impl GlobalConfig {
                 "show_cmds_in_dry_mode" => gconfig.show_cmds_in_dry_mode = v.as_bool().ok_or("Value is not a Bool!")?,
                 "show_reports" => gconfig.show_reports = v.as_bool().ok_or("Value is not a Bool!")?,
                 "error_on_unknown_keys" => gconfig.error_on_unknown_keys = v.as_bool().ok_or("Value is not a Bool!")?,
+                "warn_on_duplicates" => gconfig.warn_on_duplicates = v.as_bool().ok_or("Value is not a Bool!")?,
                 _ => {
                     if !v.is_table() {
                         // Ignore tables, since they are not global configurations anymore
@@ -126,7 +130,7 @@ fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> AResult<Vec<String>>
             .lines()
             .flatten()
             .collect();
-    package_list.sort_unstable();
+    package_list.sort_unstable(); // TODO MAYBE: replace by cleanup_package_list (commands should generally not return duplicates, so this may be unnecessary)
     Ok(package_list)
 }
 
@@ -166,6 +170,28 @@ fn compare_lists_in_both(l1: &[String], l2: &[String]) -> Vec<String> {
         .filter(|item| l2.binary_search(item).is_ok())
         .cloned()
         .collect()
+}
+
+/// Function that does all the post processing of a package list.
+/// Mainly sorting the vector and detecting and removing duplicates.
+fn cleanup_package_list<T: PartialEq + Ord + Display>(gconfig: &GlobalConfig, l: &mut Vec<T>) {
+    l.sort_unstable();
+
+    // We remove the elements manually, to report found duplicates.
+    let mut i = 0;
+    while i < l.len() - 1 {
+        // Remove all duplicates at once, so the warning is only displayed once.
+        // We need to check length again every loop to avoid buffer overflows.
+        let mut dupcount = 1;
+        while i < l.len() - 1 && l[i] == l[i + 1] {
+            l.remove(i + 1);
+            dupcount += 1;
+        }
+        if dupcount > 1 && gconfig.warn_on_duplicates {
+            eprintln!("Duplicate element detected: {} (x{})", l[i], dupcount);
+        }
+        i += 1;
+    }
 }
 
 fn report(gconfig: &GlobalConfig, msg: &String, objects: &[String], seperator: &str) {
@@ -446,7 +472,7 @@ impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
         // Read config file and map to array
         let render = tera.render("config_file", &context)?;
         let mut package_list: Vec<String> = render.lines().map(String::from).collect();
-        package_list.sort_unstable();
+        cleanup_package_list(self.global_config, &mut package_list);
 
         Ok(package_list)
     }
