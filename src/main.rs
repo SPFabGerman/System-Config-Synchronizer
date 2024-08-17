@@ -5,9 +5,6 @@ use toml::Table;
 
 pub type AResult<T> = Result<T, Box<dyn Error>>;
 
-mod global_config;
-use global_config::GlobalConfig;
-
 mod package_synchronizer;
 use package_synchronizer::*;
 
@@ -60,17 +57,6 @@ fn main() -> ExitCode {
         }
     };
 
-    let global_config = match GlobalConfig::new(&config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "Error in Global Configuration: {}",
-                error_pretty_print(e.as_ref(), false)
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
     let pacman_config = match config.get("pacman") {
         Some(toml::Value::Table(x)) => x,
         _ => {
@@ -79,7 +65,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let pacman_config = match new_pacman(&global_config, pacman_config) {
+    let pacman_config = match new_pacman(pacman_config) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error in Pacman Config: {}", error_pretty_print(e.as_ref(), false));

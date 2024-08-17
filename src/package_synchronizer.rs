@@ -7,19 +7,14 @@ use std::process::{Command, Stdio};
 use tera::{Context, Tera};
 use toml::Value;
 
-use crate::global_config::GlobalConfig;
 use crate::AResult;
 
-fn run_cmd(gconfig: &GlobalConfig, cmd: &[String]) -> AResult<()> {
+fn run_cmd(cmd: &[String]) -> AResult<()> {
     if cmd.is_empty() {
         return Ok(());
     }
 
     println!("> {}", cmd.join(" "));
-
-    if gconfig.dry_mode {
-        return Ok(());
-    }
 
     // let cmd_ret = Command::new(&cmd[0]).args(&cmd[1..]).status()?;
     let cmd_ret = Command::new("echo").arg(">").args(cmd).status()?; // For debugging purposes
@@ -29,16 +24,12 @@ fn run_cmd(gconfig: &GlobalConfig, cmd: &[String]) -> AResult<()> {
     Ok(())
 }
 
-fn run_cmd_with_list(gconfig: &GlobalConfig, cmd: &[String], list: &[String]) -> AResult<()> {
+fn run_cmd_with_list(cmd: &[String], list: &[String]) -> AResult<()> {
     if cmd.is_empty() || list.is_empty() {
         return Ok(());
     }
 
     println!("> {} {}", cmd.join(" "), list.join(" "));
-
-    if gconfig.dry_mode {
-        return Ok(());
-    }
 
     // let cmd_ret = Command::new(&cmd[0]).args(&cmd[1..]).args(list).status()?;
     let cmd_ret = Command::new("echo").arg(">").args(cmd).args(list).status()?; // For debugging purposes
@@ -139,12 +130,12 @@ fn toml_value_to_cmd_array(val: &toml::Value) -> AResult<Vec<String>> {
     }
 }
 
-pub trait SystemConfigSyncronizer<'a> {
-    fn sync(&'a self) -> AResult<()>;
+pub trait SystemConfigSyncronizer {
+    fn sync(self) -> AResult<()>;
 }
 
-pub struct ThreeStateSyncronizer<'a> {
-    global_config: &'a GlobalConfig,
+#[derive(Clone)]
+pub struct ThreeStateSyncronizer {
     #[allow(unused)]
     sudo_cmd: String,
     comment_string: String,
@@ -161,20 +152,19 @@ pub struct ThreeStateSyncronizer<'a> {
     get_orphans_cmd: Vec<String>,
     get_group_packages_cmd: Vec<String>,
 }
-struct ThreeStateUpDiff<'a> {
-    parent_sync: &'a ThreeStateSyncronizer<'a>,
+struct ThreeStateUpDiff {
+    parent_sync: ThreeStateSyncronizer,
     to_install: Vec<String>,
     to_mark_explicit: Vec<String>,
 }
-struct ThreeStateDownDiff<'a> {
-    parent_sync: &'a ThreeStateSyncronizer<'a>,
+struct ThreeStateDownDiff {
+    parent_sync: ThreeStateSyncronizer,
     to_remove: Vec<String>,
     to_mark_dependency: Vec<String>,
 }
 
-fn pacman_default_config(gconfig: &GlobalConfig, sudo_cmd: String) -> ThreeStateSyncronizer {
+fn pacman_default_config(sudo_cmd: String) -> ThreeStateSyncronizer {
     ThreeStateSyncronizer {
-        global_config: gconfig,
         comment_string: "#".to_string(),
         config_path: "current_packages".to_string(),
         installed_packages_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
@@ -202,9 +192,8 @@ fn pacman_default_config(gconfig: &GlobalConfig, sudo_cmd: String) -> ThreeState
     }
 }
 
-pub fn new_pacman<'a>(gconfig: &'a GlobalConfig, config: &toml::Table) -> AResult<ThreeStateSyncronizer<'a>> {
+pub fn new_pacman(config: &toml::Table) -> AResult<ThreeStateSyncronizer> {
     let mut pacman_config = pacman_default_config(
-        gconfig,
         config
             .get("sudo_cmd")
             .unwrap_or(&Value::String("sudo".to_string()))
@@ -238,7 +227,7 @@ pub fn new_pacman<'a>(gconfig: &'a GlobalConfig, config: &toml::Table) -> AResul
     Ok(pacman_config)
 }
 
-impl<'a> ThreeStateSyncronizer<'a> {
+impl ThreeStateSyncronizer {
     fn get_group_packages(
         cmd: &[String],
         args: &HashMap<std::string::String, tera::Value>,
@@ -315,41 +304,41 @@ impl<'a> ThreeStateSyncronizer<'a> {
         Ok(package_list)
     }
 
-    fn get_up_diff(&'a self, config_state: &[String]) -> AResult<ThreeStateUpDiff<'a>> {
+    fn get_up_diff(&self, config_state: &[String]) -> AResult<ThreeStateUpDiff> {
         let installed_packages = get_packages_from_command(&self.installed_packages_cmd)?;
         let dependency_packages = get_packages_from_command(&self.dependency_packages_cmd)?;
 
         Ok(ThreeStateUpDiff {
-            parent_sync: self,
+            parent_sync: self.clone(),
             to_install: compare_lists_only_in_first(config_state, &installed_packages),
             to_mark_explicit: compare_lists_in_both(config_state, &dependency_packages),
         })
     }
 
-    fn get_down_diff(&'a self, config_state: &[String]) -> AResult<ThreeStateDownDiff<'a>> {
+    fn get_down_diff(&self, config_state: &[String]) -> AResult<ThreeStateDownDiff> {
         let explicitly_installed_packages = get_packages_from_command(&self.explicitly_installed_cmd)?;
         let explicitly_unrequired_packages = get_packages_from_command(&self.explicitly_unrequired_cmd)?;
         let explicitly_required_packages =
             compare_lists_only_in_first(&explicitly_installed_packages, &explicitly_unrequired_packages);
 
         Ok(ThreeStateDownDiff {
-            parent_sync: self,
+            parent_sync: self.clone(),
             to_remove: compare_lists_only_in_first(&explicitly_unrequired_packages, config_state),
             to_mark_dependency: compare_lists_only_in_first(&explicitly_required_packages, config_state),
         })
     }
 
     fn pre_sync(&self) -> AResult<()> {
-        run_cmd(self.global_config, &self.update_cmd)
+        run_cmd(&self.update_cmd)
     }
 
     fn post_sync(&self) -> AResult<()> {
         let orphans = get_packages_from_command(&self.get_orphans_cmd)?;
-        run_cmd_with_list(self.global_config, &self.remove_cmd, &orphans)
+        run_cmd_with_list(&self.remove_cmd, &orphans)
     }
 }
 
-impl<'a> ThreeStateUpDiff<'a> {
+impl ThreeStateUpDiff {
     fn report(&self) {
         report(&"Packages to install:".to_string(), &self.to_install, ", ");
         report(
@@ -360,21 +349,13 @@ impl<'a> ThreeStateUpDiff<'a> {
     }
 
     fn sync(self) -> AResult<()> {
-        run_cmd_with_list(
-            self.parent_sync.global_config,
-            &self.parent_sync.as_explicit_cmd,
-            &self.to_mark_explicit,
-        )?;
-        run_cmd_with_list(
-            self.parent_sync.global_config,
-            &self.parent_sync.install_cmd,
-            &self.to_install,
-        )?;
+        run_cmd_with_list(&self.parent_sync.as_explicit_cmd, &self.to_mark_explicit)?;
+        run_cmd_with_list(&self.parent_sync.install_cmd, &self.to_install)?;
         Ok(())
     }
 }
 
-impl<'a> ThreeStateDownDiff<'a> {
+impl ThreeStateDownDiff {
     fn report(&self) {
         report(&"Packages to remove:".to_string(), &self.to_remove, ", ");
         report(
@@ -385,22 +366,14 @@ impl<'a> ThreeStateDownDiff<'a> {
     }
 
     fn sync(self) -> AResult<()> {
-        run_cmd_with_list(
-            self.parent_sync.global_config,
-            &self.parent_sync.as_dependency_cmd,
-            &self.to_mark_dependency,
-        )?;
-        run_cmd_with_list(
-            self.parent_sync.global_config,
-            &self.parent_sync.remove_cmd,
-            &self.to_remove,
-        )?;
+        run_cmd_with_list(&self.parent_sync.as_dependency_cmd, &self.to_mark_dependency)?;
+        run_cmd_with_list(&self.parent_sync.remove_cmd, &self.to_remove)?;
         Ok(())
     }
 }
 
-impl<'a> SystemConfigSyncronizer<'a> for ThreeStateSyncronizer<'a> {
-    fn sync(&'a self) -> AResult<()> {
+impl SystemConfigSyncronizer for ThreeStateSyncronizer {
+    fn sync(self) -> AResult<()> {
         self.pre_sync()?;
 
         let config_state = self.get_current_config_state()?;
