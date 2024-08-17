@@ -1,14 +1,38 @@
 use std::error::Error;
 use std::fs::{self};
+use std::process::Command;
 use std::process::ExitCode;
 use toml::Table;
 
 pub type AResult<T> = Result<T, Box<dyn Error>>;
+pub type CommandVector = Vec<String>;
 
 mod package_synchronizer;
 use package_synchronizer::*;
 
-fn error_pretty_print(err: &dyn Error, skip_first: bool) -> String {
+#[allow(unused)]
+fn run_cmd(cmd: &[String]) -> AResult<()> {
+    if cmd.is_empty() {
+        return Ok(());
+    }
+
+    println!("> {}", cmd.join(" "));
+
+    // let cmd_ret = Command::new(&cmd[0]).args(&cmd[1..]).status()?;
+    let cmd_ret = Command::new("echo").arg(">").args(cmd).status()?; // For debugging purposes
+    if !cmd_ret.success() {
+        return Err(Box::from("Command did not succeed"));
+    }
+    Ok(())
+}
+
+fn pretty_print_cmds(cmd: &Vec<CommandVector>) {
+    for c in cmd {
+        println!("> {}", c.join(" "));
+    }
+}
+
+fn error_pretty_format(err: &dyn Error, skip_first: bool) -> String {
     let mut skip_first = skip_first;
     let mut s = Vec::new();
     let mut err: Option<&dyn Error> = Some(err);
@@ -29,22 +53,12 @@ fn error_pretty_print(err: &dyn Error, skip_first: bool) -> String {
 }
 
 fn main() -> ExitCode {
-    let config_path = match std::env::var("SCS_GLOBAL_CONFIG") {
-        Ok(p) => p,
-        Err(std::env::VarError::NotPresent) => "config.toml".to_string(),
-        Err(e) => {
-            eprintln!(
-                "Error reading environment variable SCS_GLOBAL_CONFIG: {}",
-                error_pretty_print(&e, false)
-            );
-            return ExitCode::FAILURE;
-        }
-    };
+    let config_path = "config.toml".to_string();
 
     let config = match fs::read_to_string(config_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error reading config file: {}", error_pretty_print(&e, false));
+            eprintln!("Error reading config file: {}", error_pretty_format(&e, false));
             return ExitCode::FAILURE;
         }
     };
@@ -52,7 +66,7 @@ fn main() -> ExitCode {
     let config = match config.parse::<Table>() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error reading config file: {}", error_pretty_print(&e, false));
+            eprintln!("Error reading config file: {}", error_pretty_format(&e, false));
             return ExitCode::FAILURE;
         }
     };
@@ -68,28 +82,37 @@ fn main() -> ExitCode {
     let pacman_config = match new_pacman(pacman_config) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Error in Pacman Config: {}", error_pretty_print(e.as_ref(), false));
+            eprintln!("Error in Pacman Config: {}", error_pretty_format(e.as_ref(), false));
             return ExitCode::FAILURE;
         }
     };
+    println!("Pacman Config: {:?}", pacman_config);
 
-    if let Err(e) = pacman_config.sync() {
-        eprintln!("Error syncronizing: {}", error_pretty_print(e.as_ref(), false));
-        return ExitCode::FAILURE;
-    }
+    let up_cmds = match pacman_config.get_up_cmds() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Error running query commands: {}",
+                error_pretty_format(e.as_ref(), false)
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Up Commands:");
+    pretty_print_cmds(&up_cmds);
 
-    // let state = match pacman_config.get_current_system_state() {
-    //     Ok(s) => s,
-    //     Err(e) => {
-    //         eprintln!("Error retrieving system state: {}", error_pretty_print(e.as_ref(), false));
-    //         return ExitCode::FAILURE;
-    //     }
-    // };
-
-    // if let Err(e) = pacman_config.write_state_to_file(&state) {
-    //     eprintln!("Error writing state to file: {}", error_pretty_print(e.as_ref(), false));
-    //     return ExitCode::FAILURE;
-    // }
+    let down_cmds = match pacman_config.get_down_cmds() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Error running query commands: {}",
+                error_pretty_format(e.as_ref(), false)
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Down Commands:");
+    pretty_print_cmds(&down_cmds);
 
     ExitCode::SUCCESS
 }
