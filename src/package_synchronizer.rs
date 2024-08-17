@@ -135,7 +135,7 @@ pub trait SystemConfigSyncronizer {
 }
 
 #[derive(Clone)]
-pub struct ThreeStateSyncronizer {
+pub struct PackageSyncronizer {
     #[allow(unused)]
     sudo_cmd: String,
     comment_string: String,
@@ -153,18 +153,18 @@ pub struct ThreeStateSyncronizer {
     get_group_packages_cmd: Vec<String>,
 }
 struct ThreeStateUpDiff {
-    parent_sync: ThreeStateSyncronizer,
+    parent_sync: PackageSyncronizer,
     to_install: Vec<String>,
     to_mark_explicit: Vec<String>,
 }
 struct ThreeStateDownDiff {
-    parent_sync: ThreeStateSyncronizer,
+    parent_sync: PackageSyncronizer,
     to_remove: Vec<String>,
     to_mark_dependency: Vec<String>,
 }
 
-fn pacman_default_config(sudo_cmd: String) -> ThreeStateSyncronizer {
-    ThreeStateSyncronizer {
+fn pacman_default_config(sudo_cmd: String) -> PackageSyncronizer {
+    PackageSyncronizer {
         comment_string: "#".to_string(),
         config_path: "current_packages".to_string(),
         installed_packages_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
@@ -192,7 +192,7 @@ fn pacman_default_config(sudo_cmd: String) -> ThreeStateSyncronizer {
     }
 }
 
-pub fn new_pacman(config: &toml::Table) -> AResult<ThreeStateSyncronizer> {
+pub fn new_pacman(config: &toml::Table) -> AResult<PackageSyncronizer> {
     let mut pacman_config = pacman_default_config(
         config
             .get("sudo_cmd")
@@ -227,7 +227,7 @@ pub fn new_pacman(config: &toml::Table) -> AResult<ThreeStateSyncronizer> {
     Ok(pacman_config)
 }
 
-impl ThreeStateSyncronizer {
+impl PackageSyncronizer {
     fn get_group_packages(
         cmd: &[String],
         args: &HashMap<std::string::String, tera::Value>,
@@ -284,7 +284,7 @@ impl ThreeStateSyncronizer {
             "group",
             Box::new(
                 move |args: &HashMap<std::string::String, tera::Value>| -> core::result::Result<tera::Value, tera::Error> {
-                    ThreeStateSyncronizer::get_group_packages(&cmd, args)
+                    PackageSyncronizer::get_group_packages(&cmd, args)
                 },
             ),
         );
@@ -372,7 +372,7 @@ impl ThreeStateDownDiff {
     }
 }
 
-impl SystemConfigSyncronizer for ThreeStateSyncronizer {
+impl SystemConfigSyncronizer for PackageSyncronizer {
     fn sync(self) -> AResult<()> {
         self.pre_sync()?;
 
