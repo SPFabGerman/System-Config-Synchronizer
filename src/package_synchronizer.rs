@@ -25,7 +25,7 @@ fn get_packages_from_command<T: AsRef<OsStr>>(cmd: &[T]) -> AResult<Vec<String>>
             .lines()
             .map_while(Result::ok)
             .collect();
-    package_list.sort_unstable(); // TODO MAYBE: replace by cleanup_package_list (commands should generally not return duplicates, so this may be unnecessary)
+    package_list.sort_unstable(); // TODO MAYBE: replace by cleanup_package_list (commands should generally not return duplicates, so this may be unnecessary) or remove
     Ok(package_list)
 }
 
@@ -45,7 +45,6 @@ fn compare_lists_in_both(l1: &[String], l2: &[String]) -> Vec<String> {
 
 /// Function that does all the post processing of a package list.
 /// Mainly sorting the vector and detecting and removing duplicates.
-#[allow(unused)]
 fn cleanup_package_list<T: PartialEq + Ord>(l: &mut Vec<T>) {
     l.sort_unstable();
     l.dedup();
@@ -83,6 +82,8 @@ pub trait SystemConfigSynchronizer {
 #[derive(Debug, Clone)]
 pub struct PackageSynchronizer {
     packages: Vec<String>,
+    groups: Vec<String>,
+    blacklist: Vec<String>,
     meta: PackageSynchronizerMeta,
 }
 
@@ -100,13 +101,13 @@ struct PackageSynchronizerMeta {
     update_cmd: Vec<String>,
     #[allow(unused)]
     get_orphans_cmd: Vec<String>,
-    #[allow(unused)]
     get_group_packages_cmd: Vec<String>,
 }
 
 pub fn new_pacman(config: &toml::Table) -> AResult<PackageSynchronizer> {
+    let allowed_keys = ["sudo_cmd", "packages", "groups", "blacklist"];
+
     // Check for unknown keys
-    let allowed_keys = ["sudo_cmd", "packages"];
     for k in config.keys() {
         if !allowed_keys.contains(&k.as_str()) {
             return Err(format!("Unknown key: {}", k).into());
@@ -117,6 +118,8 @@ pub fn new_pacman(config: &toml::Table) -> AResult<PackageSynchronizer> {
 
     let pacman_config = PackageSynchronizer {
         packages: get_from_table(config, "packages", Vec::new())?,
+        groups: get_from_table(config, "groups", Vec::new())?,
+        blacklist: get_from_table(config, "blacklist", Vec::new())?,
         meta: PackageSynchronizerMeta {
             installed_packages_cmd: vec!["pacman".to_string(), "-Qnq".to_string()],
             dependency_packages_cmd: vec!["pacman".to_string(), "-Qnqd".to_string()],
@@ -156,14 +159,40 @@ pub fn new_pacman(config: &toml::Table) -> AResult<PackageSynchronizer> {
 //     }
 // }
 
+impl PackageSynchronizer {
+    fn calculate_config_state(&self) -> AResult<Vec<String>> {
+        // Check if packages and blacklist have an overlap. Error if so.
+        let conflicts = compare_lists_in_both(&self.packages, &self.blacklist);
+        if !conflicts.is_empty() {
+            return Err(format!("Packages and Blacklist have an overlap: {}", conflicts.join(", ")).into());
+        }
+
+        let mut config_state = self.packages.clone();
+        if !self.groups.is_empty() {
+            // Create cmd array
+            let mut cmd = self.meta.get_group_packages_cmd.clone();
+            cmd.extend(self.groups.clone());
+            // Get all packages in the groups
+            let group_packages = get_packages_from_command(&cmd)?;
+            // Add the group packages to the config state
+            config_state.extend(group_packages);
+            // Remove all blacklisted packages
+            config_state = compare_lists_only_in_first(&config_state, &self.blacklist);
+        }
+
+        cleanup_package_list(&mut config_state);
+        Ok(config_state)
+    }
+}
+
 impl SystemConfigSynchronizer for PackageSynchronizer {
     fn get_up_cmds(&self) -> AResult<Vec<CommandVector>> {
-        let config_state = &self.packages;
+        let config_state = self.calculate_config_state()?;
         let installed_packages = get_packages_from_command(&self.meta.installed_packages_cmd)?;
         let dependency_packages = get_packages_from_command(&self.meta.dependency_packages_cmd)?;
 
-        let to_install = compare_lists_only_in_first(config_state, &installed_packages);
-        let to_mark_explicit = compare_lists_in_both(config_state, &dependency_packages);
+        let to_install = compare_lists_only_in_first(&config_state, &installed_packages);
+        let to_mark_explicit = compare_lists_in_both(&config_state, &dependency_packages);
 
         let mut cmd_list = Vec::new();
 
@@ -180,14 +209,14 @@ impl SystemConfigSynchronizer for PackageSynchronizer {
     }
 
     fn get_down_cmds(&self) -> AResult<Vec<CommandVector>> {
-        let config_state = &self.packages;
+        let config_state = self.calculate_config_state()?;
         let explicitly_installed_packages = get_packages_from_command(&self.meta.explicitly_installed_cmd)?;
         let explicitly_unrequired_packages = get_packages_from_command(&self.meta.explicitly_unrequired_cmd)?;
         let explicitly_required_packages =
             compare_lists_only_in_first(&explicitly_installed_packages, &explicitly_unrequired_packages);
 
-        let to_remove = compare_lists_only_in_first(&explicitly_unrequired_packages, config_state);
-        let to_mark_dependency = compare_lists_only_in_first(&explicitly_required_packages, config_state);
+        let to_remove = compare_lists_only_in_first(&explicitly_unrequired_packages, &config_state);
+        let to_mark_dependency = compare_lists_only_in_first(&explicitly_required_packages, &config_state);
 
         let mut cmd_list = Vec::new();
 
