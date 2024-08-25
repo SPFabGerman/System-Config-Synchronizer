@@ -51,7 +51,7 @@ fn cleanup_package_list<T: PartialEq + Ord>(l: &mut Vec<T>) {
 }
 
 #[allow(unused)]
-fn toml_value_to_cmd_array(val: &toml::Value) -> AResult<Vec<String>> {
+fn toml_value_to_cmd_array(val: &toml::Value) -> AResult<CommandVector> {
     match val {
         toml::Value::String(s) => Ok(s.split_whitespace().map(String::from).collect()),
         toml::Value::Array(arr) => {
@@ -74,7 +74,23 @@ fn get_from_table<'a, T: toml::macros::Deserialize<'a>>(table: &Table, key: &str
         .map_or(Ok(default), |v: &Value| Value::try_into::<T>(v.clone()))
 }
 
+/// Single Ok.
+/// Convenience wrapper to change one element into a Result+Vector combo with just this element.
+/// Always returns `Ok(...)`.
+#[allow(non_snake_case)]
+fn SOk<T>(element: T) -> AResult<Vec<T>> {
+    Ok(vec![element])
+}
+
+/// Convenience wrapper to concatenate two lists.
+/// All elements are cloned.
+fn concat<T: Clone>(l1: &[T], l2: &[T]) -> Vec<T> {
+    [l1, l2].concat()
+}
+
 pub trait SystemConfigSynchronizer {
+    fn get_pre_cmds(&self) -> AResult<Vec<CommandVector>>;
+    fn get_post_cmds(&self) -> AResult<Vec<CommandVector>>;
     fn get_up_cmds(&self) -> AResult<Vec<CommandVector>>;
     fn get_down_cmds(&self) -> AResult<Vec<CommandVector>>;
 }
@@ -89,19 +105,17 @@ pub struct PackageSynchronizer {
 
 #[derive(Debug, Clone)]
 struct PackageSynchronizerMeta {
-    installed_packages_cmd: Vec<String>,
-    dependency_packages_cmd: Vec<String>,
-    explicitly_installed_cmd: Vec<String>,
-    explicitly_unrequired_cmd: Vec<String>,
-    as_explicit_cmd: Vec<String>,
-    install_cmd: Vec<String>,
-    as_dependency_cmd: Vec<String>,
-    remove_cmd: Vec<String>,
-    #[allow(unused)]
-    update_cmd: Vec<String>,
-    #[allow(unused)]
-    get_orphans_cmd: Vec<String>,
-    get_group_packages_cmd: Vec<String>,
+    installed_packages_cmd: CommandVector,
+    dependency_packages_cmd: CommandVector,
+    explicitly_installed_cmd: CommandVector,
+    explicitly_unrequired_cmd: CommandVector,
+    as_explicit_cmd: CommandVector,
+    install_cmd: CommandVector,
+    as_dependency_cmd: CommandVector,
+    remove_cmd: CommandVector,
+    update_cmd: CommandVector,
+    get_orphans_cmd: CommandVector,
+    get_group_packages_cmd: CommandVector,
 }
 
 pub fn new_pacman(config: &toml::Table) -> AResult<PackageSynchronizer> {
@@ -148,17 +162,6 @@ pub fn new_pacman(config: &toml::Table) -> AResult<PackageSynchronizer> {
     Ok(pacman_config)
 }
 
-// impl PackageSyncronizer {
-//     fn pre_sync(&self) -> AResult<()> {
-//         run_cmd(&self.update_cmd)
-//     }
-
-//     fn post_sync(&self) -> AResult<()> {
-//         let orphans = get_packages_from_command(&self.get_orphans_cmd)?;
-//         run_cmd_with_list(&self.remove_cmd, &orphans)
-//     }
-// }
-
 impl PackageSynchronizer {
     fn calculate_config_state(&self) -> AResult<Vec<String>> {
         // Check if packages and blacklist have an overlap. Error if so.
@@ -186,6 +189,15 @@ impl PackageSynchronizer {
 }
 
 impl SystemConfigSynchronizer for PackageSynchronizer {
+    fn get_pre_cmds(&self) -> AResult<Vec<CommandVector>> {
+        SOk(self.meta.update_cmd.clone())
+    }
+
+    fn get_post_cmds(&self) -> AResult<Vec<CommandVector>> {
+        let orphans = get_packages_from_command(&self.meta.get_orphans_cmd)?;
+        SOk(concat(&self.meta.remove_cmd, &orphans))
+    }
+
     fn get_up_cmds(&self) -> AResult<Vec<CommandVector>> {
         let config_state = self.calculate_config_state()?;
         let installed_packages = get_packages_from_command(&self.meta.installed_packages_cmd)?;
@@ -197,11 +209,11 @@ impl SystemConfigSynchronizer for PackageSynchronizer {
         let mut cmd_list = Vec::new();
 
         if !to_mark_explicit.is_empty() {
-            let as_explicit_cmd = [self.meta.as_explicit_cmd.clone(), to_mark_explicit].concat();
+            let as_explicit_cmd = concat(&self.meta.as_explicit_cmd, &to_mark_explicit);
             cmd_list.push(as_explicit_cmd);
         }
         if !to_install.is_empty() {
-            let to_install_cmd = [self.meta.install_cmd.clone(), to_install].concat();
+            let to_install_cmd = concat(&self.meta.install_cmd, &to_install);
             cmd_list.push(to_install_cmd);
         }
 
@@ -221,11 +233,11 @@ impl SystemConfigSynchronizer for PackageSynchronizer {
         let mut cmd_list = Vec::new();
 
         if !to_mark_dependency.is_empty() {
-            let as_dependency_cmd = [self.meta.as_dependency_cmd.clone(), to_mark_dependency].concat();
+            let as_dependency_cmd = concat(&self.meta.as_dependency_cmd, &to_mark_dependency);
             cmd_list.push(as_dependency_cmd);
         }
         if !to_remove.is_empty() {
-            let remove_cmd = [self.meta.remove_cmd.clone(), to_remove].concat();
+            let remove_cmd = concat(&self.meta.remove_cmd, &to_remove);
             cmd_list.push(remove_cmd);
         }
 

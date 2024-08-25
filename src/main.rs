@@ -16,10 +16,7 @@ fn run_cmd(cmd: &[String]) -> AResult<()> {
         return Ok(());
     }
 
-    println!("> {}", cmd.join(" "));
-
-    // let cmd_ret = Command::new(&cmd[0]).args(&cmd[1..]).status()?;
-    let cmd_ret = Command::new("echo").arg(">").args(cmd).status()?; // For debugging purposes
+    let cmd_ret = Command::new(&cmd[0]).args(&cmd[1..]).status()?;
     if !cmd_ret.success() {
         return Err(Box::from("Command did not succeed"));
     }
@@ -88,6 +85,19 @@ fn main() -> ExitCode {
     };
     println!("Pacman Config: {:?}", pacman_config);
 
+    let pre_cmds = match pacman_config.get_pre_cmds() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Error running query commands: {}",
+                error_pretty_format(e.as_ref(), false)
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Pre Commands:");
+    pretty_print_cmds(&pre_cmds);
+
     let up_cmds = match pacman_config.get_up_cmds() {
         Ok(c) => c,
         Err(e) => {
@@ -113,6 +123,19 @@ fn main() -> ExitCode {
     };
     println!("Down Commands:");
     pretty_print_cmds(&down_cmds);
+
+    let post_cmds = match pacman_config.get_post_cmds() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Error running query commands: {}",
+                error_pretty_format(e.as_ref(), false)
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Post Commands:");
+    pretty_print_cmds(&post_cmds);
 
     ExitCode::SUCCESS
 }
