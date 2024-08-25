@@ -119,7 +119,7 @@ struct PackageSynchronizerMeta {
 }
 
 pub fn new_pacman(config: &toml::Table) -> AResult<PackageSynchronizer> {
-    let allowed_keys = ["sudo_cmd", "packages", "groups", "blacklist"];
+    let allowed_keys = ["type", "sudo_cmd", "packages", "groups", "blacklist"];
 
     // Check for unknown keys
     for k in config.keys() {

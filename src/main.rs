@@ -49,6 +49,25 @@ fn error_pretty_format(err: &dyn Error, skip_first: bool) -> String {
     }
 }
 
+fn find_config_tables(table: Table) -> Vec<Table> {
+    if table.contains_key("type") {
+        return vec![table];
+    }
+
+    let mut arr = Vec::new();
+    for (_key, value) in table {
+        match value {
+            toml::Value::Table(subtable) => {
+                let new_arr = find_config_tables(subtable);
+                arr.extend(new_arr);
+            }
+            _ => continue,
+        }
+    }
+
+    arr
+}
+
 fn main() -> ExitCode {
     let config_path = "config.toml".to_string();
 
@@ -68,8 +87,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let pacman_config = match config.get("pacman") {
-        Some(toml::Value::Table(x)) => x,
+    let config_tables = find_config_tables(config);
+    let pacman_config = match config_tables.first() {
+        Some(x) => x,
         _ => {
             eprintln!("Could not find valid pacman configuration.");
             return ExitCode::FAILURE;
