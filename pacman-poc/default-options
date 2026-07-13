@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# Default package file to use
+PACKAGE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/system-package-config/pacman-packages"
+
+# Suppress all output
+SILENT=false
+
+# Do not show packages names, when commiting changes, since pacman already shows them
+SUPPRESS_PACKAGE_NAMES=true
+
+# Don't make any changes, only show what would be done
+DRY_RUN=true
+
+# Skip any confirmation prompts during execution of pacman (adds --noconfirm to PACMAN_OPTIONS)
+NOCONFIRM=false
+
+# Specify additional options to pass to pacman
+PACMAN_OPTIONS=()
+
+# Update all packages before any operations
+DO_UPDATES=true
+
+# Remove remaining orphans after all operations
+REMOVE_ORPHANS=true
+

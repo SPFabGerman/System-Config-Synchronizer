@@ -1,0 +1,207 @@
+#!/bin/bash
+
+set -euo pipefail
+IFS=$'\n\t'
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/system-package-config/default-options"
+PACKAGE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/system-package-config/pacman-packages"
+generate_package_config=false
+
+# Set default values for options
+SILENT=false
+SUPPRESS_PACKAGE_NAMES=true
+DRY_RUN=true
+NOCONFIRM=false
+PACMAN_OPTIONS=()
+DO_UPDATES=true
+REMOVE_ORPHANS=true
+
+
+
+print_help() {
+    echo "Usage: $0 [options]"
+    echo "Options:"
+    echo "  -s, --silent         suppress all output"
+    echo "  -d, --dry-run        don't make any changes, only show what would be done"
+    echo "  -c, --commit, --no-dry-run"
+    echo "                       commit changes to the system, opposite of --dry-run"
+    echo "  -n, --noconfirm      skip any confirmation prompts during execution"
+    echo "  --doconfirm          do not skip any confirmation prompts during execution, opposite if --noconfirm"
+    echo "  --config-file <file>"
+    echo "                       specify config file to use"
+    echo "  --generate-package-config"
+    echo "                       generate a new package file"
+    echo "  --package-file <file>"
+    echo "                       specify package file to use"
+    echo "  -h, --help           show this help message"
+}
+
+# Loop over all arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -s|--silent)
+            SILENT=true
+            ;;
+        -d|--dry-run)
+            DRY_RUN=true
+            ;;
+        -c|--commit|--no-dry-run)
+            DRY_RUN=false
+            ;;
+        -n|--noconfirm)
+            NOCONFIRM=true
+            ;;
+        --doconfirm)
+            NOCONFIRM=false
+            ;;
+        --config-file)
+            CONFIG_FILE="$2"
+            shift
+            if [[ ! -f "${CONFIG_FILE}" ]]; then
+                echo "Config file could not be found!"
+                exit 1
+            fi
+            ;;
+        --generate-package-config)
+            generate_package_config=true
+            ;;
+        --package-file)
+            PACKAGE_FILE="$2"
+            shift
+            ;;
+        -h|--help)
+            print_help
+            exit 1
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# Load custom config, if it exists
+if [[ -f "${CONFIG_FILE}" ]]; then
+    [[ "${SILENT}"  == "false" ]] && echo "Use config file at ${CONFIG_FILE}"
+    source ${CONFIG_FILE}
+fi
+
+# Ensure that option is only added once
+if [[ "${NOCONFIRM}" == true ]]; then
+    PACMAN_OPTIONS+="--noconfirm"
+fi
+
+
+
+# Generate config now (after flag parsing), since the PACKAGE_FILE variable may have changed because of flags
+if [[ "${generate_package_config}" == "true" ]]; then
+    if [[ -f "${PACKAGE_FILE}" ]]; then
+        echo "Error: package config file already exists! Aborting."
+        exit 1
+    fi
+    mkdir -p "$(dirname ${PACKAGE_FILE})"
+    pacman -Qnqe > "${PACKAGE_FILE}"
+    echo "Default package config file created at ${PACKAGE_FILE}"
+    exit 0
+fi
+
+# Check that package config file exists
+if [[ ! -f "${PACKAGE_FILE}" ]]; then
+    echo "Error: package config file not found at ${PACKAGE_FILE}"
+    exit 1
+fi
+
+
+
+# Read the package names from the file
+# Filter out comments and empty lines
+# Sort for later usage with `comm`
+config_packages=$(sed -E 's/\s*(#.*)?$//;/^$/d' "${PACKAGE_FILE}" | sort)
+
+
+# === UPDATE PHASE ===
+
+if [[ "${DO_UPDATES}" == "true" && "${DRY_RUN}" == "false" ]]; then
+    # No reason to output this message, when we do a dry-run, since we do no package checks here anyway.
+    [[ "${SILENT}"  == "false" ]] && echo "Updating packages:"
+    sudo pacman -Syu "${PACMAN_OPTIONS[@]}"
+fi
+
+
+
+# === INSTALL PHASE ===
+
+# Get the list of all installed packages and dependecies
+installed_packages=$(pacman -Qnq | sort)
+dependency_packages=$(pacman -Qnqd | sort)
+
+# Get the list of packages that are not yet installed
+to_install=( $(comm -23 <(echo "${config_packages}") <(echo "${installed_packages}")) )
+# Get the list of packages that have to be marked as explicitly installed
+to_mark_explicit=( $(comm -12 <(echo "${config_packages}") <(echo "${dependency_packages}")) )
+
+# Mark packages installed as dependencies as explicitly installed
+if [[ ${#to_mark_explicit[@]} -ne 0 ]]; then
+    [[ "${SILENT}"  == "false" ]] && echo "Marking packages as explicitly installed:"
+    [[ "${SILENT}"  == "false" ]] && ( [[ "${SUPPRESS_PACKAGE_NAMES}"  == "false" ]] || [[ "${DRY_RUN}" == "true" ]] ) \
+        && printf '  %s\n' "${to_mark_explicit[@]}"
+    [[ "${DRY_RUN}" == "false" ]] && sudo pacman -D "${PACMAN_OPTIONS[@]}" --asexplicit "${to_mark_explicit[@]}"
+fi
+
+# Install any packages that aren't already installed
+if [[ ${#to_install[@]} -ne 0 ]]; then
+    [[ "${SILENT}"  == "false" ]] && echo "Installing packages:"
+    [[ "${SILENT}"  == "false" ]] && ( [[ "${SUPPRESS_PACKAGE_NAMES}"  == "false" ]] || [[ "${DRY_RUN}" == "true" ]] ) \
+        && printf '  %s\n' "${to_install[@]}"
+    [[ "${DRY_RUN}" == "false" ]] && sudo pacman -S "${PACMAN_OPTIONS[@]}" "${to_install[@]}"
+fi
+
+
+
+# === UNINSTALL PHASE ===
+
+# Installations may have changed requiered dependencies, so we query the packages again
+# Get the list of all explicitly installed packages and filter for packages that are and aren't required
+installed_explicitly_packages=$(pacman -Qnqe | sort)
+installed_unrequired_packages=$(pacman -Qnqet | sort)
+installed_required_packages=$(comm -23 --check-order <(echo "${installed_explicitly_packages}") <(echo "${installed_unrequired_packages}"))
+
+# Get the list of explicitly installed packages that aren't in the package-config file
+# Packages that aren't required, can be removed safely
+to_remove=( $(comm -23 <(echo "${installed_unrequired_packages}") <(echo "${config_packages}")) )
+# Packages that are required, cannot be removed and need to be changed to dependecies
+to_dependency=( $(comm -23 <(echo "${installed_required_packages}") <(echo "${config_packages}")) )
+
+# Mark packages that are dependencies of other packages as such
+# We mark as dependecies first and uninstall later, so that new dependecies are removed in the uninstall cleanup
+if [[ ${#to_dependency[@]} -ne 0 ]]; then
+    [[ "${SILENT}"  == "false" ]] && echo "Marking packages as dependencies:"
+    [[ "${SILENT}"  == "false" ]] && ( [[ "${SUPPRESS_PACKAGE_NAMES}"  == "false" ]] || [[ "${DRY_RUN}" == "true" ]] ) \
+        && printf '  %s\n' "${to_dependency[@]}"
+    [[ "${DRY_RUN}" == "false" ]] && sudo pacman -D "${PACMAN_OPTIONS[@]}" --asdeps "${to_dependency[@]}"
+fi
+
+# Remove any explicitly installed packages that aren't listed in the file
+if [[ ${#to_remove[@]} -ne 0 ]]; then
+    [[ "${SILENT}"  == "false" ]] && echo "Removing packages:"
+    [[ "${SILENT}"  == "false" ]] && ( [[ "${SUPPRESS_PACKAGE_NAMES}"  == "false" ]] || [[ "${DRY_RUN}" == "true" ]] ) \
+        && printf '  %s\n' "${to_remove[@]}"
+    [[ "${DRY_RUN}" == "false" ]] && sudo pacman -R "${PACMAN_OPTIONS[@]}" -s "${to_remove[@]}"
+fi
+
+
+
+# === CLEANUP PHASE ===
+
+# Remove any packages, that are no longer necessary (e.g. orphans)
+if [[ "${REMOVE_ORPHANS}" == true ]]; then
+    unneded_packages=( $(pacman -Qnqdt | sort) )
+    if [[ ${#unneded_packages[@]} -ne 0 ]]; then
+        [[ "${SILENT}"  == "false" ]] && echo "Removing unnecessary orphan packages:"
+        [[ "${SILENT}"  == "false" ]] && ( [[ "${SUPPRESS_PACKAGE_NAMES}"  == "false" ]] || [[ "${DRY_RUN}" == "true" ]] ) \
+            && printf '  %s\n' "${unneded_packages[@]}"
+        [[ "${DRY_RUN}" == "false" ]] && sudo pacman -R "${PACMAN_OPTIONS[@]}" -s "${unneded_packages[@]}"
+    fi
+fi
+

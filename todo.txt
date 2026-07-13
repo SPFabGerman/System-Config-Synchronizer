@@ -1,0 +1,20 @@
+- Design & Specification -> Code Restructure
+- Automatic package manager detection
+- Multiple Tables with different types
+- Group and Unit Tables
+- Allow priority of tables to be changed; seperate up and down synchronization
+- Allow only selected tables to be run
+- Allow config file to be changed / supplied as argument -> different config files for user or admin
+- Flags to overwrite config values
+- Split config over multiple files natively (Recursion?)
+- Features
+- Automatic conflict detection of options of features or multiple config files
+- Local Overwrites of Global Values
+- Better Error Messages, Custom Error Types
+- Generate default config file
+- Manual inspection of calculated final lists + current system state
+- Diffs
+- Automatic change of config file
+- Colorize output
+- Manpage and help flag
+- Good way to enable / disable template parsing of config files
